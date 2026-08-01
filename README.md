@@ -28,6 +28,7 @@ ln -s "$(pwd)/claude-skills/skills/jp-frontend-design" ~/.claude/skills/jp-front
 | Skill | What it governs | Pairs with |
 |---|---|---|
 | [jp-frontend-design](skills/jp-frontend-design/) | The ORDER of frontend design work: brief → tokens → hero screen → screenshot-critique loop → scale out | A craft-level design skill (e.g. Anthropic's `frontend-design`); a dataviz skill for charts |
+| [agentmail-onboard](skills/agentmail-onboard/) | Onboarding a new email+Telegram agent against an agentmail control plane, one runbook step at a time | Your own control-plane repo holding the onboarding runbook it drives |
 
 One row per skill; each skill's own README covers what it is, what it's good
 for, and who it's for.
