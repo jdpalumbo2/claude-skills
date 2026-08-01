@@ -20,7 +20,8 @@ governs the ORDER of work.
 
 1. **Brief.** Propose 3 distinct visual directions: each gets a name, 3 mood words,
    a typography pairing, a color story, and one thing it deliberately avoids.
-   The user picks or remixes. Working autonomously? Pick the direction most
+   Slop-test each: would a generic version of this prompt produce the same
+   direction? If yes, replace it. The user picks or remixes. Working autonomously? Pick the direction most
    grounded in the subject's own world and say so — never the safest.
 2. **Tokens file.** One `tokens.css` / theme config before any component: semantic
    color names, type scale, spacing scale, radii, shadows. Every component consumes
@@ -31,11 +32,13 @@ governs the ORDER of work.
    the tokens. Analyze-then-build, never clone.
 4. **One hero screen to full polish.** Not a scaffold of every page. One screen,
    finished, embodying the brief's signature element.
-5. **Screenshot critique loop — minimum 2 rounds.** Render it, screenshot it
-   (browser MCP / Playwright / DevTools), then critique the image as a senior
-   product designer: 10 specific problems across hierarchy, spacing, typography,
-   color; fix; re-shoot. Models critique rendered output far better than they
-   design blind — the loop is where quality actually happens.
+5. **Screenshot critique loop — minimum 2 rounds.** Render it, screenshot at
+   desktop AND mobile widths (browser MCP / Playwright / DevTools), then critique
+   both images as a senior product designer: 10 specific problems across
+   hierarchy, spacing, typography, color; fix; re-shoot. Quality floor each
+   round: responsive at mobile width, visible keyboard focus,
+   prefers-reduced-motion respected. Models critique rendered output far better
+   than they design blind — the loop is where quality actually happens.
 6. **Scale out.** Only after the hero passes: "extend this system" to remaining
    screens. Coherence comes from the tokens + finished exemplar.
 
@@ -60,6 +63,9 @@ untouched component-library defaults · emoji as UI icons · uniform rounded-sha
 cards · big-number-small-label hero · cream + serif + terracotta "tasteful" default ·
 near-black + single acid accent default · broadsheet hairlines/zero-radius default ·
 centered-everything · copy that sells instead of explains
+
+Copy is design material: name things by what the user controls, active voice,
+buttons say what happens.
 
 ## Common mistakes
 
