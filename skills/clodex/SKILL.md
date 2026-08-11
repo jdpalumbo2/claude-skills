@@ -73,13 +73,57 @@ event **counts** — it is in the log and the reducer applies it — so **do not
 retry** (that would double-write). Run `rebuild` to refresh the snapshot and
 carry on from the event you just appended.
 
+### Telemetry: two fields any event may carry
+
+The vocabulary is frozen at 23 names, so what happened *around* an event is
+recorded as fields on it rather than as events of its own. Both are optional;
+a run that never sets them reduces exactly as it would have without them.
+
+- **`preflight`** — `{"status": …, "checks": [{"name", "status", "detail"}]}`.
+  Appended to the snapshot's `preflight` list. §1 explains when.
+- **`codex`** — one **leg** of a Codex role invocation:
+  ```json
+  {"codex": {"invocation_id": "plan-reviewer-20260811T134400Z-88b056",
+             "role": "plan-reviewer", "round": 4, "status": "complete",
+             "envelope": ".clodex/runner/plan-reviewer/<id>.envelope.json",
+             "input_hashes": ["<sha256 of each artifact it read>"],
+             "duration_s": 501, "resumed": false}}
+  ```
+  `invocation_id` and `role` are required — a record nothing can be matched to
+  would read as evidence that a round happened. Everything comes off the
+  envelope the runner already wrote; `input_hashes` is what binds a review to
+  the plan version it actually read.
+
+  **A leg, not an invocation.** A resumed round overwrites its own envelope,
+  which then reports only the resume — the pilot's envelopes under-reported the
+  review by 25% that way. So append one `codex` block for the interrupted leg
+  (`"status": "interrupted"`) and another for the resume (`"resumed": true`),
+  both with the same `invocation_id`. The legs sum to what the round cost.
+
+Attach a `codex` block to the first event that invocation causes — the finding
+it raised, the `batch:reviewed` it produced, the `plan:amended` it forced. A
+round that found nothing still gets one: put it on the event its clean result
+unlocked (`plan:approved`, `batch:reviewed`), or the log cannot tell "reviewed
+clean" from "never reviewed".
+
+`finding:recorded` additionally takes `severity`, `summary`, `round`,
+`invocation` and `plan_hash` — see `clodex-plan` §9.
+
 ---
 
 ## 1. Preflight — before any stage runs
 
-Run every check. A failed check stops here; do not "proceed and see." Preflight
-results are reported in chat, not logged as events — the durable part is
-recorded in `run:opened` (§6).
+Run every check. A failed check stops here; do not "proceed and see." Report the
+results in chat **and carry them into the run**: the `run:opened` event in §6
+takes a `preflight` field holding every check's verdict, so "was this
+environment ever verified?" is answerable from the manifest instead of from a
+transcript. Preflight that runs again — on a resume, or after the user fixes a
+failed check — rides on whatever event you append next, and appends a second
+record rather than replacing the first.
+
+A run that is resumed rather than opened has no `run:opened` to carry it: put
+the `preflight` field on the `stage:*:entered` event the stage skill appends,
+which is the first event of the resumed session.
 
 **When a check fails**, the invocation does not end: name the check, say exactly
 what would fix it, and wait for the user. When they say it is fixed, **resume
@@ -501,8 +545,21 @@ shell interpolation — the brief is verbatim user text and will contain quotes:
  "brief": "<the ask, verbatim>",
  "lane": "feature",
  "git": {"start_head": "<git rev-parse HEAD>",
-         "dirty_at_start": ["src/app.ts", "docs/plans/older-draft.md"]}}
+         "dirty_at_start": ["src/app.ts", "docs/plans/older-draft.md"]},
+ "preflight": {"status": "pass",
+               "checks": [{"name": "repo-root", "status": "pass", "detail": "/absolute/path/to/repo, branch main"},
+                          {"name": "remote", "status": "pass", "detail": "origin reachable, 0 ahead 0 behind"},
+                          {"name": "clodex-ignore", "status": "pass", "detail": "run state ignored, profile tracked"},
+                          {"name": "runtimes", "status": "pass", "detail": "node 22.4.0, python 3.12.2"},
+                          {"name": "codex-auth", "status": "pass", "detail": "codex login status ok"},
+                          {"name": "required-env", "status": "pass", "detail": "none required"}]}}
 ```
+
+One check per §1 item, in §1's order, each with the verdict you reported in
+chat. `status` is the verdict for the whole list — `pass` only when every check
+passed. A check the user fixed mid-preflight is recorded at the verdict it
+**ended** on, and `detail` says it was fixed, because the manifest's job is to
+answer whether the environment was verified, not to relitigate how.
 
 Two fields need a decision rather than a copy:
 
@@ -548,6 +605,7 @@ own entry event, so the log never claims a stage that did not start.
 
 | Mistake | Instead |
 |---|---|
-| Inventing an event name | The vocabulary is frozen at 23 names and the reducer refuses anything else; the full list is the `e` enum in `$CLODEX_HOME/state/schemas/event.schema.json`. This skill appends only four of them: `run:opened`, `run:closed`, `release:updated`, `approval:granted`. |
+| Inventing an event name | The vocabulary is frozen at 23 names and the reducer refuses anything else; the full list is the `e` enum in `$CLODEX_HOME/state/schemas/event.schema.json`. This skill appends only four of them: `run:opened`, `run:closed`, `release:updated`, `approval:granted`. Something the names do not cover is a **field** on one of them — see the telemetry block above. |
+| Reporting preflight only in chat | Chat is a transcript, and answering "was this environment verified?" from a transcript is the gap this field closes. It goes in `run:opened` (§6), or on the resumed session's first event (§1). |
 | Hand-editing `run.json` | It is derived. Append an event; `rebuild` regenerates it. |
 | Building an audit/repair/chore/sync lane on the fly | Name the shape, say it is v0.2, propose the manual approach (§4). |

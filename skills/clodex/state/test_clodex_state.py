@@ -124,6 +124,23 @@ class StateTestCase(unittest.TestCase):
             "pid": pid, "acquired_at": "2026-08-10T00:00:00Z", "token": "someone-elses-token",
         }))
 
+    def append_all(self, *events):
+        for event in events:
+            append_event(self.run_dir, event)
+
+    def assert_last_event_refused(self, *events):
+        """Every event but the last is legal; the last must never reach the log."""
+        for event in events[:-1]:
+            append_event(self.run_dir, event)
+        before = self.events.read_text() if self.events.exists() else ""
+
+        with self.assertRaises(ReducerInvariantError):
+            append_event(self.run_dir, events[-1])
+
+        after = self.events.read_text() if self.events.exists() else ""
+        self.assertEqual(after, before)  # append-only log untouched
+        rebuild(self.run_dir)  # and the run is still readable
+
 
 class EventLogTests(StateTestCase):
     def test_seq_monotonic_and_fsynced(self):
@@ -320,23 +337,6 @@ class ConcurrencyTests(StateTestCase):
 
 
 class ReducerTests(StateTestCase):
-    def append_all(self, *events):
-        for event in events:
-            append_event(self.run_dir, event)
-
-    def assert_last_event_refused(self, *events):
-        """Every event but the last is legal; the last must never reach the log."""
-        for event in events[:-1]:
-            append_event(self.run_dir, event)
-        before = self.events.read_text() if self.events.exists() else ""
-
-        with self.assertRaises(ReducerInvariantError):
-            append_event(self.run_dir, events[-1])
-
-        after = self.events.read_text() if self.events.exists() else ""
-        self.assertEqual(after, before)  # append-only log untouched
-        rebuild(self.run_dir)  # and the run is still readable
-
     def test_reducer_deterministic(self):
         # plan:recorded precedes the approval because an approval must bind to a
         # plan hash; the determinism assertion itself is unchanged.
@@ -585,6 +585,241 @@ class ReducerTests(StateTestCase):
             }) + "\n")
         with self.assertRaises(ReducerInvariantError):
             rebuild(self.run_dir)
+
+
+class TelemetryTests(StateTestCase):
+    """The optional fields that let `rebuild` answer what happened.
+
+    The pilot could not tell from the manifest how many review rounds ran,
+    which Codex invocation produced a finding, what a round cost, or whether
+    preflight ever passed. These fields close that without touching the frozen
+    23-name vocabulary: a log that carries none of them reduces exactly as it
+    always did (`FixtureTests`).
+    """
+
+    def test_finding_severity_and_summary_reach_the_snapshot(self):
+        self.append_all(
+            {"e": "run:opened"},
+            {"e": "finding:recorded", "id": "r1-F001", "source": "plan-reviewer",
+             "severity": "high", "summary": "the plan predicts a row count it cannot know"},
+        )
+        finding = rebuild(self.run_dir)["findings"][0]
+        self.assertEqual(finding["severity"], "high")
+        self.assertEqual(finding["summary"], "the plan predicts a row count it cannot know")
+
+    def test_a_finding_records_the_round_and_the_invocation_that_raised_it(self):
+        self.append_all(
+            {"e": "run:opened"},
+            {"e": "finding:recorded", "id": "r4-F002", "source": "plan-reviewer",
+             "round": 4, "invocation": "plan-reviewer-20260811T134400Z-88b056",
+             "plan_hash": "a" * 64},
+        )
+        finding = rebuild(self.run_dir)["findings"][0]
+        self.assertEqual(finding["round"], 4)
+        self.assertEqual(finding["invocation"], "plan-reviewer-20260811T134400Z-88b056")
+        # which version it was raised against — the pilot could not answer this
+        self.assertEqual(finding["plan_hash"], "a" * 64)
+
+    def test_a_finding_omits_the_optional_fields_it_was_not_given(self):
+        self.append_all(
+            {"e": "run:opened"},
+            {"e": "finding:recorded", "id": "F1", "source": "plan-reviewer"},
+        )
+        finding = rebuild(self.run_dir)["findings"][0]
+        self.assertEqual(sorted(finding), ["disposition", "id", "source"])
+
+    def test_a_codex_block_records_one_invocation_leg(self):
+        self.append_all(
+            {"e": "run:opened"},
+            {"e": "finding:recorded", "id": "r1-F001", "source": "plan-reviewer", "round": 1,
+             "codex": {"invocation_id": "inv-1", "role": "plan-reviewer", "round": 1,
+                       "status": "complete", "envelope": ".clodex/runner/plan-reviewer/inv-1.envelope.json",
+                       "input_hashes": ["b" * 64], "duration_s": 366, "cost": 0.42}},
+        )
+        legs = rebuild(self.run_dir)["invocations"]
+        self.assertEqual(len(legs), 1)
+        self.assertEqual(legs[0]["invocation_id"], "inv-1")
+        self.assertEqual(legs[0]["role"], "plan-reviewer")
+        self.assertEqual(legs[0]["duration_s"], 366)
+        self.assertEqual(legs[0]["input_hashes"], ["b" * 64])
+        # traceable back to the event that carried it
+        self.assertEqual(legs[0]["seq"], 2)
+
+    def test_a_resumed_round_keeps_both_legs_so_the_cost_is_the_truth(self):
+        # The envelope on disk under-reports a resumed round by overwriting the
+        # interrupted one — 34 s in place of 634. Two legs, so the sum is real.
+        self.append_all(
+            {"e": "run:opened"},
+            {"e": "finding:recorded", "id": "r2-F001", "source": "plan-reviewer",
+             "codex": {"invocation_id": "inv-2", "role": "plan-reviewer", "round": 2,
+                       "status": "interrupted", "duration_s": 600}},
+            {"e": "finding:disposed", "id": "r2-F001", "disposition": "fixed",
+             "codex": {"invocation_id": "inv-2", "role": "plan-reviewer", "round": 2,
+                       "status": "complete", "duration_s": 34, "resumed": True}},
+        )
+        legs = rebuild(self.run_dir)["invocations"]
+        self.assertEqual([leg["status"] for leg in legs], ["interrupted", "complete"])
+        self.assertEqual(sum(leg["duration_s"] for leg in legs), 634)
+        self.assertTrue(legs[1]["resumed"])
+
+    def test_a_reviewed_batch_records_the_invocation_that_reviewed_it(self):
+        self.append_all(
+            {"e": "run:opened"},
+            {"e": "batch:opened", "id": 1, "owned_paths": ["src/"]},
+            {"e": "batch:reviewed", "id": 1, "delta_review": "pass", "invocation": "inv-cr"},
+            {"e": "batch:opened", "id": 2, "owned_paths": ["docs/"]},
+            {"e": "batch:reviewed", "id": 2, "delta_review": "pass-no-test-command"},
+        )
+        batches = rebuild(self.run_dir)["batches"]
+        self.assertEqual(batches[0]["invocation"], "inv-cr")
+        # a verdict reached without a Codex round says so by omission
+        self.assertNotIn("invocation", batches[1])
+
+    def test_a_codex_block_rides_on_any_event_in_the_vocabulary(self):
+        self.append_all(
+            {"e": "run:opened"},
+            {"e": "batch:opened", "id": 1, "owned_paths": ["src/"]},
+            {"e": "batch:reviewed", "id": 1, "delta_review": "pass",
+             "codex": {"invocation_id": "inv-cr", "role": "code-reviewer", "status": "complete"}},
+        )
+        legs = rebuild(self.run_dir)["invocations"]
+        self.assertEqual([leg["role"] for leg in legs], ["code-reviewer"])
+
+    def assert_refused_at_both_layers(self, event):
+        """The append refuses it, and the reducer refuses it written out of band.
+
+        Two layers because they answer different questions: the event schema
+        stops an ordinary append, and the reducer remains the authority for a
+        log some other implementation wrote.
+        """
+        append_event(self.run_dir, {"e": "run:opened"})
+        before = self.events.read_text()
+
+        with self.assertRaises(ClodexStateError):
+            append_event(self.run_dir, event)
+        self.assertEqual(self.events.read_text(), before)  # append-only log untouched
+
+        with open(self.events, "a") as handle:
+            handle.write(json.dumps(dict(event, schema_version=1, seq=2, t="2026-08-11T00:00:00Z")) + "\n")
+        with self.assertRaises(ReducerInvariantError):
+            rebuild(self.run_dir)
+
+    def test_a_codex_block_without_an_invocation_id_is_refused(self):
+        # An invocation record nothing can be matched to is worse than none:
+        # it would read as evidence that a round happened.
+        self.assert_refused_at_both_layers(
+            {"e": "finding:recorded", "id": "F1", "source": "plan-reviewer",
+             "codex": {"role": "plan-reviewer", "status": "complete"}},
+        )
+
+    def test_a_codex_block_without_a_role_is_refused(self):
+        self.assert_refused_at_both_layers(
+            {"e": "finding:recorded", "id": "F2", "source": "plan-reviewer",
+             "codex": {"invocation_id": "inv-3", "status": "complete"}},
+        )
+
+    def test_preflight_results_reach_the_snapshot(self):
+        self.append_all(
+            {"e": "run:opened", "preflight": {
+                "status": "pass",
+                "checks": [{"name": "codex-auth", "status": "pass", "detail": "logged in"},
+                           {"name": "runtimes", "status": "pass", "detail": "node, python-venv"}],
+            }},
+        )
+        preflight = rebuild(self.run_dir)["preflight"]
+        self.assertEqual(len(preflight), 1)
+        self.assertEqual(preflight[0]["status"], "pass")
+        self.assertEqual([c["name"] for c in preflight[0]["checks"]], ["codex-auth", "runtimes"])
+        self.assertEqual(preflight[0]["seq"], 1)
+
+    def test_preflight_run_again_on_resume_is_a_second_record(self):
+        self.append_all(
+            {"e": "run:opened", "preflight": {"status": "pass", "checks": []}},
+            {"e": "stage:build:entered", "preflight": {"status": "fail", "checks": [
+                {"name": "codex-auth", "status": "fail", "detail": "token expired"}]}},
+        )
+        preflight = rebuild(self.run_dir)["preflight"]
+        self.assertEqual([p["status"] for p in preflight], ["pass", "fail"])
+
+    def test_a_preflight_record_without_a_status_is_refused(self):
+        self.assert_refused_at_both_layers(
+            {"e": "stage:plan:entered", "preflight": {"checks": []}},
+        )
+
+    def test_the_new_keys_are_absent_when_no_event_supplied_them(self):
+        # Absence is the backwards-compatibility contract: a run that used none
+        # of this reduces to the same bytes it always did.
+        self.append_all({"e": "run:opened"}, {"e": "stage:plan:entered"})
+        snap = rebuild(self.run_dir)
+        self.assertNotIn("invocations", snap)
+        self.assertNotIn("preflight", snap)
+
+    def test_status_reports_rounds_and_invocations(self):
+        self.append_all(
+            {"e": "run:opened", "run": "r-1", "lane": "feature",
+             "preflight": {"status": "pass", "checks": []}},
+            {"e": "finding:recorded", "id": "r1-F001", "source": "plan-reviewer",
+             "severity": "high", "round": 1,
+             "codex": {"invocation_id": "inv-1", "role": "plan-reviewer", "round": 1,
+                       "status": "complete", "duration_s": 366}},
+        )
+        out = subprocess.run(
+            [sys.executable, MODULE, "status", str(self.run_dir)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertIn("preflight: pass", out)
+        self.assertIn("plan-reviewer", out)
+        self.assertIn("1 round", out)
+        self.assertIn("366s", out)
+        self.assertIn("high", out)
+
+
+class FixtureTests(StateTestCase):
+    """The pilot run's own event log, redacted but structurally untouched.
+
+    `legacy-run` is that log as it stood before any of the telemetry fields
+    were read by anything; its snapshot is committed as a golden. Nothing may
+    ever change those bytes — that is what makes the telemetry additive.
+    """
+
+    FIXTURES = HERE / "fixtures"
+
+    def reduce_fixture(self, name):
+        run_dir = self.tmp_root / name
+        run_dir.mkdir()
+        (run_dir / "events.ndjson").write_text(
+            (self.FIXTURES / (name + ".events.ndjson")).read_text()
+        )
+        return rebuild(run_dir)
+
+    def test_a_log_with_no_telemetry_fields_reduces_to_the_committed_golden(self):
+        golden = (self.FIXTURES / "legacy-run.snapshot.json").read_text()
+        rebuilt = json.dumps(self.reduce_fixture("legacy-run"), sort_keys=True, indent=2) + "\n"
+        self.assertEqual(rebuilt, golden)
+
+    def test_the_pilot_log_differs_from_the_golden_only_by_added_finding_fields(self):
+        golden = json.loads((self.FIXTURES / "legacy-run.snapshot.json").read_text())
+        pilot = self.reduce_fixture("pilot-run")
+
+        stripped = json.loads(json.dumps(pilot))
+        for finding in stripped["findings"]:
+            for key in ("severity", "summary"):
+                finding.pop(key, None)
+        # Strip the additions and the real log reduces to exactly what it did
+        # before: nothing pre-existing moved.
+        self.assertEqual(stripped, golden)
+        # And the additions are really there.
+        self.assertTrue(all(f.get("severity") for f in pilot["findings"]))
+        self.assertEqual(len(pilot["findings"]), len(golden["findings"]))
+
+    def test_the_fixture_is_the_pilot_log_in_every_field_the_reducer_reads(self):
+        pilot = [json.loads(line) for line
+                 in (self.FIXTURES / "pilot-run.events.ndjson").read_text().splitlines() if line.strip()]
+        legacy = [json.loads(line) for line
+                  in (self.FIXTURES / "legacy-run.events.ndjson").read_text().splitlines() if line.strip()]
+        self.assertEqual(len(pilot), len(legacy))
+        self.assertEqual([e["e"] for e in pilot], [e["e"] for e in legacy])
+        self.assertEqual([e["seq"] for e in pilot], list(range(1, len(pilot) + 1)))
 
 
 class LockTests(StateTestCase):

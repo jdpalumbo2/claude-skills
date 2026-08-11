@@ -409,7 +409,15 @@ codes, and mixing them up costs a duplicate event or a lost review.)
 
 Record every finding with `source: "code-reviewer"`, continuing the same `s-`
 sequence §3(b) started — if it recorded `s-F001`, these are `s-F002` onward, and
-`finding:recorded` refuses a duplicate id. Dispose every one before §5. What carries over unchanged
+`finding:recorded` refuses a duplicate id. Each carries `invocation`, and the
+first of them carries the `codex` block (`clodex` → Telemetry) with this round's
+`role`, `status`, `envelope`, `input_hashes` and `duration_s`. **A round that
+finds nothing carries it too** — put it on the `approval:granted` event §5
+appends, because a release whose final review found nothing and a release whose
+final review never ran must not look the same in the manifest. This is the only
+Codex round this stage makes, and it is the one the release rests on.
+
+Dispose every one before §5. What carries over unchanged
 from `clodex-plan` §9: the three dispositions, that **only the user** may accept
 or reject one and their words go in the `note`, that nothing is ever dropped, and
 that an `accepted` blocker is a legitimate end state. What is different here:
@@ -2029,4 +2037,4 @@ A resumable run gets 2–4 as well, plus the resume line instead of 1.
 | Letting a commit no batch owns ride along unmentioned | Record it as a finding, have the user dispose it, and itemise it in the authorization beside the debt (§3(b)). |
 | Fixing a code finding here because it is small | This stage changes no code. The three legal outcomes are `clodex-verify` §8's, unchanged (§3(c)). |
 | `git tag -f`, `git push --force`, or deleting a published ref to clean something up | Not in any authorization this skill writes, and not a decision this skill makes. Stop and hand it to the user (§2, §8). |
-| Inventing an event name | The vocabulary is frozen at 23 names and the reducer refuses anything else. This stage appends ten of them (§0). |
+| Inventing an event name | The vocabulary is frozen at 23 names and the reducer refuses anything else. This stage appends ten of them (§0). Something the names do not cover is a **field** on one of them — the optional `preflight` and `codex` blocks, and `finding:recorded`'s `severity`/`summary`/`round`/`invocation`/`plan_hash` (`clodex` → Telemetry). |

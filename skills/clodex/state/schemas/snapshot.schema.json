@@ -83,7 +83,8 @@
           "id": {"type": ["integer", "string"]},
           "owned_paths": {"type": "array", "items": {"type": "string"}},
           "commit": {"type": ["string", "null"]},
-          "delta_review": {"type": ["string", "null"]}
+          "delta_review": {"type": ["string", "null"]},
+          "invocation": {"type": ["string", "null"], "description": "Optional: the `invocations[].invocation_id` that reviewed this batch. Absent when the verdict was reached without a Codex round."}
         }
       }
     },
@@ -91,11 +92,52 @@
       "type": "array",
       "items": {
         "type": "object",
+        "description": "Everything past the first three is carried only when the recording event supplied it, so a log written before they were read reduces unchanged.",
         "required": ["id", "source", "disposition"],
         "properties": {
           "id": {"type": ["integer", "string"]},
           "source": {"type": ["string", "null"]},
-          "disposition": {"type": ["string", "null"]}
+          "disposition": {"type": ["string", "null"]},
+          "severity": {"type": ["string", "null"], "description": "The source's own grade. Read across rounds, this is the severity trend a round-count cap cannot see."},
+          "summary": {"type": ["string", "null"]},
+          "round": {"type": ["integer", "null"]},
+          "invocation": {"type": ["string", "null"], "description": "The `invocations[].invocation_id` that raised it."},
+          "plan_hash": {"type": ["string", "null"], "description": "The plan version it was raised against."}
+        }
+      }
+    },
+    "preflight": {
+      "type": "array",
+      "description": "Optional. One record per preflight run, so 'was this environment ever verified?' is answerable from the manifest. Absent when no event carried a preflight result.",
+      "items": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "seq": {"type": "integer"},
+          "t": {"type": ["string", "null"]},
+          "status": {"type": "string"},
+          "checks": {"type": "array", "items": {"type": "object"}}
+        }
+      }
+    },
+    "invocations": {
+      "type": "array",
+      "description": "Optional. One entry per leg of a Codex role invocation, in event order. Legs are never merged: an interrupted round and the leg that resumed it are two entries, and their durations sum to what the round actually cost. Absent when no event carried a codex block.",
+      "items": {
+        "type": "object",
+        "required": ["invocation_id", "role"],
+        "properties": {
+          "seq": {"type": "integer"},
+          "t": {"type": ["string", "null"]},
+          "invocation_id": {"type": "string"},
+          "role": {"type": "string"},
+          "round": {"type": ["integer", "null"]},
+          "status": {"type": ["string", "null"]},
+          "envelope": {"type": ["string", "null"]},
+          "input_hashes": {"type": "array", "items": {"type": "string"}},
+          "duration_s": {"type": ["number", "null"]},
+          "cost": {"type": ["number", "string", "null"]},
+          "resumed": {"type": ["boolean", "null"]}
         }
       }
     },

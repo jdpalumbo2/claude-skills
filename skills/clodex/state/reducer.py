@@ -160,6 +160,44 @@ def _find(items, key, value, event, what):
 
 
 # --------------------------------------------------------------------------- #
+# telemetry — what happened around an event, not a new kind of event
+# --------------------------------------------------------------------------- #
+
+#: Any event may carry these. They exist because the pilot could not answer,
+#: from the manifest alone, how many review rounds ran, which invocation raised
+#: a finding, what a round cost, or whether preflight ever passed — while the
+#: event vocabulary is frozen at the 23 names in HANDLERS. So they are fields,
+#: not names, and the buckets they fill are created on first use: a log that
+#: carries none of them reduces to exactly the bytes it did before they existed.
+TELEMETRY = ("preflight", "codex")
+
+
+def _collect_telemetry(snap, event):
+    preflight = event.get("preflight")
+    if preflight is not None:
+        if not isinstance(preflight, dict) or not preflight.get("status"):
+            raise _violation(event, "preflight must be an object carrying a 'status'")
+        snap.setdefault("preflight", []).append(
+            dict(preflight, seq=event.get("seq"), t=event.get("t"))
+        )
+
+    codex = event.get("codex")
+    if codex is not None:
+        if not isinstance(codex, dict):
+            raise _violation(event, "codex must be an object")
+        # An invocation record that cannot be matched to an invocation is worse
+        # than no record: it reads as evidence that a round happened.
+        for key in ("invocation_id", "role"):
+            if not codex.get(key):
+                raise _violation(event, "codex block must carry a non-empty %r" % key)
+        # One entry per leg, never merged. A resumed round overwrites its own
+        # envelope on disk, so the interrupted leg's duration survives only here.
+        snap.setdefault("invocations", []).append(
+            dict(codex, seq=event.get("seq"), t=event.get("t"))
+        )
+
+
+# --------------------------------------------------------------------------- #
 # handlers
 # --------------------------------------------------------------------------- #
 
@@ -283,6 +321,10 @@ def _on_batch_committed(snap, event):
 def _on_batch_reviewed(snap, event):
     batch = _find(snap["batches"], "id", event.get("id"), event, "batch")
     batch["delta_review"] = event.get("delta_review")
+    # Which invocation reviewed it, when one did. Carried only when given: a
+    # verdict reached without a Codex round says so by leaving this out.
+    if "invocation" in event:
+        batch["invocation"] = event["invocation"]
 
 
 def _on_finding_recorded(snap, event):
@@ -291,11 +333,19 @@ def _on_finding_recorded(snap, event):
         raise _violation(event, "finding:recorded without an id")
     if any(finding["id"] == finding_id for finding in snap["findings"]):
         raise _violation(event, "finding %r already recorded" % (finding_id,))
-    snap["findings"].append({
+    finding = {
         "id": finding_id,
         "source": event.get("source"),
         "disposition": event.get("disposition", "open"),
-    })
+    }
+    # Recorded only when given, so a log that set none of them is unchanged.
+    # `round` and `invocation` are what let a reader see the severity trend
+    # across rounds; `plan_hash` is which version the finding was raised
+    # against, which the run's own id convention used to be the only trace of.
+    for key in ("severity", "summary", "round", "invocation", "plan_hash"):
+        if key in event:
+            finding[key] = event[key]
+    snap["findings"].append(finding)
 
 
 def _on_finding_disposed(snap, event):
@@ -396,6 +446,7 @@ def reduce_events(events):
                 "event log seq is not monotonic: %r follows %r" % (seq, snap["last_seq"])
             )
         handler(snap, event)
+        _collect_telemetry(snap, event)
         snap["last_seq"] = seq
 
     try:

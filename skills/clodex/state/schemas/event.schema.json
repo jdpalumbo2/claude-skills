@@ -46,6 +46,52 @@
         "release:step:reconciled",
         "release:updated"
       ]
+    },
+    "preflight": {
+      "type": "object",
+      "description": "Optional, on any event: the result of a preflight run. Recorded as a field rather than an event because the vocabulary above is frozen. Appended to the snapshot's `preflight` list, so a resumed run that checks again adds a second record rather than replacing the first.",
+      "required": ["status"],
+      "properties": {
+        "status": {"type": "string", "description": "pass | fail | warn — the verdict for the whole run of checks."},
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {"type": "string"},
+              "status": {"type": "string"},
+              "detail": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "codex": {
+      "type": "object",
+      "description": "Optional, on any event: one leg of a Codex role invocation, appended to the snapshot's `invocations` list. One entry per leg and never merged — a resumed round overwrites its own envelope on disk, so the interrupted leg's duration survives only here, and summing the legs is what makes cost accounting true.",
+      "required": ["invocation_id", "role"],
+      "properties": {
+        "invocation_id": {"type": "string", "description": "The runner's invocation id; also the envelope's basename."},
+        "role": {"type": "string", "description": "plan-reviewer | implementer | code-reviewer | advisor."},
+        "round": {"type": ["integer", "null"], "description": "Review round, where the role runs in rounds."},
+        "status": {"type": ["string", "null"], "description": "The envelope's status: complete | partial | failed | interrupted."},
+        "envelope": {"type": ["string", "null"], "description": "Path to the result envelope, which the manifest otherwise never mentions."},
+        "input_hashes": {"type": "array", "items": {"type": "string"}, "description": "sha256 of each artifact the role read — this is what binds a review to a plan version."},
+        "duration_s": {"type": ["number", "null"]},
+        "cost": {"type": ["number", "string", "null"]},
+        "resumed": {"type": ["boolean", "null"], "description": "True on the leg that resumed an interrupted one."}
+      }
+    },
+    "severity": {
+      "type": ["string", "null"],
+      "description": "finding:recorded only. Free string, because the vocabulary is the source's: plan review grades blocker/high/medium/low/info, code review Critical/Important/Minor."
+    },
+    "summary": {"type": ["string", "null"], "description": "finding:recorded only: one line naming the defect."},
+    "round": {"type": ["integer", "null"], "description": "finding:recorded only: the review round that raised it."},
+    "invocation": {"type": ["string", "null"], "description": "finding:recorded only: the `codex.invocation_id` that raised it."},
+    "plan_hash": {
+      "type": ["string", "null"],
+      "description": "On plan:approved and approval:granted, the hash the approval binds to. On finding:recorded, the plan hash the finding was raised against."
     }
   }
 }

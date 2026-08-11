@@ -522,7 +522,12 @@ Record each finding from a `complete` round **before** acting on it:
 
 ```json
 {"e": "finding:recorded", "id": "r1-F001", "source": "plan-reviewer",
- "severity": "high", "summary": "<one line, verbatim from the envelope>"}
+ "severity": "high", "summary": "<one line, verbatim from the envelope>",
+ "round": 1, "invocation": "<the envelope's invocation id>",
+ "plan_hash": "<plan.hash this round reviewed>",
+ "codex": {"invocation_id": "<same>", "role": "plan-reviewer", "round": 1,
+           "status": "complete", "envelope": "<path>",
+           "input_hashes": ["<plan.hash>"], "duration_s": 366}}
 ```
 
 `source` is the Codex **role** that produced it, from the same fixed enum that
@@ -531,6 +536,18 @@ Record each finding from a `complete` round **before** acting on it:
 **Namespace the id by round.** Envelope ids (`F001`, `F002`, …) are unique only
 within one invocation, so round 2's `F001` collides with round 1's and the
 reducer refuses it: *"finding 'F001' already recorded"*. Use `r<N>-F0NN`.
+
+**`round`, `invocation` and `plan_hash` are not decoration.** The id convention
+is a string only you remember; these are fields anything can read. Together they
+answer, from `rebuild` alone, how many rounds ran, which envelope produced a
+finding, and **which plan version it was raised against** — and they are what
+makes the severity trend visible, which §8 needs and a round count cannot see.
+Put the `codex` block (`clodex` → Telemetry) on the **first** finding of the
+round; the remaining findings of that round carry `round`/`invocation` but no
+second `codex` block, since one round is one leg. A round that returns **no**
+findings still has to be recorded, or the log cannot tell a clean round from a
+round that never ran: put its `codex` block on the `plan:approved` event (§10),
+or on the `plan:amended` if something else forced one.
 
 Then dispose it. Every recorded finding reaches one of exactly three
 dispositions — nothing is dropped, and "we talked about it" is not a state:
@@ -549,8 +566,9 @@ dispositions — nothing is dropped, and "we talked about it" is not a state:
 `accepted` and `rejected` are overrides of an independent review, which is a
 human-owned decision. Propose them — do not append them until the user has said
 so, and quote their words in `note`. `fixed` is your own work and needs no
-approval. The snapshot keeps only `id`, `source`, and `disposition`; the `note`
-lives in the event log, which is the authoritative record.
+approval. The snapshot keeps everything `finding:recorded` carried — id, source,
+disposition, severity, summary, round, invocation, plan hash — while the
+disposition's `note` lives in the event log, which is the authoritative record.
 
 **Severity does not restrict disposition.** A `blocker` the user decides to live
 with is `accepted` — that is exactly what an override is, and it is a legitimate
@@ -694,4 +712,4 @@ file or in the log, or it does not exist.
 | Running the direction checkpoint for a data or refactor change | The gate is a predicate (§4), not a mood. `no` means no checkpoint. |
 | Marking a finding `accepted` because it seemed minor | Only the user accepts or rejects a finding. Propose it in the approval message. |
 | Writing forbidden paths, batch contracts, or code | That is `clodex-build`. This stage declares owned paths and done-when. |
-| Inventing an event name | The vocabulary is frozen at 23 names; the reducer refuses anything else. This stage appends eight of them: `stage:plan:entered`, `plan:recorded`, `plan:amended`, `approval:granted`, `finding:recorded`, `finding:disposed`, `verification:declared`, `plan:approved`. |
+| Inventing an event name | The vocabulary is frozen at 23 names; the reducer refuses anything else. This stage appends eight of them: `stage:plan:entered`, `plan:recorded`, `plan:amended`, `approval:granted`, `finding:recorded`, `finding:disposed`, `verification:declared`, `plan:approved`. Something the names do not cover is a **field** on one of them — the optional `preflight` and `codex` blocks, and `finding:recorded`'s `severity`/`summary`/`round`/`invocation`/`plan_hash` (`clodex` → Telemetry). |

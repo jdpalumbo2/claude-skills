@@ -496,11 +496,16 @@ Record it before acting on it. Namespace ids by stage, because the runner mints
 
 ```json
 {"e": "finding:recorded", "id": "v-F001", "source": "code-reviewer",
- "severity": "high", "summary": "<one line, verbatim from the envelope>"}
+ "severity": "high", "summary": "<one line, verbatim from the envelope>",
+ "invocation": "<the envelope's invocation id>",
+ "codex": {"invocation_id": "<same>", "role": "code-reviewer",
+           "status": "complete", "envelope": "<path>", "duration_s": 180}}
 ```
 
 `source` is the Codex role that produced it — `code-reviewer` — or `verify` for
-one you found yourself, such as a red gate.
+one you found yourself, such as a red gate. A finding you found yourself has no
+invocation and carries neither field; a delegated one carries both, with the
+`codex` block on the first finding of that invocation (`clodex` → Telemetry).
 
 What carries over unchanged from `clodex-plan` §9: the three dispositions
 (`fixed`, `accepted`, `rejected`), that **only the user** may accept or reject
@@ -786,4 +791,4 @@ because §10 found something none of the other three can hold.
 | Re-appending evidence after a resume | The reducer does not de-duplicate. Read `verification.evidence` first and append only the missing `(class, how)` (§1). |
 | Delegating with `--role implementer` | Every delegation here is read-only. `code-reviewer` is the role, and the runner sandboxes it accordingly (§7). |
 | Reading the worker's status out of its prose | The runner's exit code and the envelope decide. Only `complete` is a review; a `partial` is resumed, not restarted (§7). |
-| Inventing an event name | The vocabulary is frozen at 23 names and the reducer refuses anything else. This stage appends five of them (§0). |
+| Inventing an event name | The vocabulary is frozen at 23 names and the reducer refuses anything else. This stage appends five of them (§0). Something the names do not cover is a **field** on one of them — the optional `preflight` and `codex` blocks, and `finding:recorded`'s `severity`/`summary`/`round`/`invocation`/`plan_hash` (`clodex` → Telemetry). |

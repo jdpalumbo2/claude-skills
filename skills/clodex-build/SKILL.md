@@ -673,12 +673,24 @@ Namespace ids by batch, because the runner mints `F001` fresh every invocation:
 
 ```json
 {"e": "finding:recorded", "id": "b1-F001", "source": "code-reviewer",
- "severity": "high", "summary": "<one line, verbatim from the envelope>"}
+ "severity": "high", "summary": "<one line, verbatim from the envelope>",
+ "invocation": "<the envelope's invocation id>",
+ "codex": {"invocation_id": "<same>", "role": "code-reviewer",
+           "status": "complete", "envelope": "<path>",
+           "input_hashes": ["<diff sha the envelope records>"], "duration_s": 214}}
 ```
 
 `source` is the Codex role that produced it — `code-reviewer`, or `implementer`
 for a finding the implementer reported itself. A second review round on the same
 batch uses `b1r2-F001`.
+
+The `codex` block (`clodex` → Telemetry) goes on the **first** finding of the
+invocation; the rest carry `invocation` alone. Every Codex call this stage makes
+gets one — the implementer's as well as the reviewer's — because otherwise the
+manifest records the batch's *result* and nothing about what it cost to get it.
+The implementer's block rides on `batch:committed`, whose `codex` names the role
+`implementer`. An invocation that was interrupted and resumed is **two** blocks,
+same `invocation_id`, the second `"resumed": true`.
 
 ### The verdict
 
@@ -689,6 +701,11 @@ Append it as soon as you have it, before you commit:
  "note": "gate green; code-reviewer complete, 2 findings fixed",
  "invocation": "<the review invocation id, or omitted when there was no review>"}
 ```
+
+`invocation` reaches the snapshot on the batch, so `rebuild` answers "was this
+batch reviewed, and by which round?" without opening the runner directory. A
+review that found **nothing** leaves no findings to hang a `codex` block on, so
+put it here — otherwise the log cannot tell a clean review from a skipped one.
 
 | `delta_review` | When |
 |---|---|
@@ -1003,4 +1020,4 @@ plan file, a commit, or the log — or it does not exist.
 | Treating a `dirty_at_start` entry as a file path | It may be a directory, and then every file inside it is acknowledged and every owned path inside it overlaps. §3 expands and tests both directions; §7 resolves ancestors. Comparing with `==` or `in` fails both ways at once — a silent commit of the user's file, and a false STOP on their WIP. |
 | Using "not in `dirty_at_start`" as the guard before restoring a stray | A file inside an acknowledged directory is not in that list either, so the guard passes and the `mv` takes the user's work out of their tree. Restore only what §7 printed as `NOT owned by this batch`. |
 | Recording `delta_review: "pass"` in a repo with no test command | `pass-no-test-command`, so verify and ship can see that nothing executed (§8). |
-| Inventing an event name | The vocabulary is frozen at 23 names and the reducer refuses anything else. This stage appends eight of them (§0). |
+| Inventing an event name | The vocabulary is frozen at 23 names and the reducer refuses anything else. This stage appends eight of them (§0). Something the names do not cover is a **field** on one of them — the optional `preflight` and `codex` blocks, and `finding:recorded`'s `severity`/`summary`/`round`/`invocation`/`plan_hash` (`clodex` → Telemetry). |

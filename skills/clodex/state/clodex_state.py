@@ -659,6 +659,54 @@ def _cmd_rebuild(args):
     return EXIT_OK
 
 
+def _plural(count, noun):
+    return "%d %s%s" % (count, noun, "" if count == 1 else "s")
+
+
+def _severity_tally(findings):
+    """`  high 3, medium 5` — empty when nothing recorded a severity.
+
+    Ordered worst first where the grade is one this project's roles use, then
+    anything else alphabetically, because the source owns its own vocabulary.
+    """
+    known = ["blocker", "critical", "high", "important", "medium", "low", "minor", "info"]
+    counts = {}
+    for finding in findings:
+        severity = finding.get("severity")
+        if severity:
+            counts[severity] = counts.get(severity, 0) + 1
+    if not counts:
+        return ""
+    order = sorted(counts, key=lambda s: (known.index(s) if s in known else len(known), s))
+    return "  " + ", ".join("%s %d" % (s, counts[s]) for s in order)
+
+
+def _invocation_lines(invocations):
+    """One line per Codex role: rounds, legs, and the time the legs really took."""
+    roles = []
+    for leg in invocations:
+        role = leg.get("role")
+        if role not in roles:
+            roles.append(role)
+
+    lines = []
+    for role in roles:
+        legs = [leg for leg in invocations if leg.get("role") == role]
+        rounds = {leg.get("round") for leg in legs if leg.get("round") is not None}
+        seconds = sum(leg.get("duration_s") or 0 for leg in legs)
+        parts = []
+        if rounds:
+            parts.append(_plural(len(rounds), "round"))
+        parts.append(_plural(len(legs), "leg"))
+        if seconds:
+            parts.append("%gs" % seconds)
+        interrupted = [leg for leg in legs if leg.get("status") not in (None, "complete")]
+        if interrupted:
+            parts.append("%d not complete" % len(interrupted))
+        lines.append("%s %s" % (role, ", ".join(parts)))
+    return lines
+
+
 def _cmd_status(args):
     snap = load_snapshot(args.run_dir)
     plan = snap["plan"]
@@ -679,7 +727,17 @@ def _cmd_status(args):
         len(snap["batches"]),
         sum(1 for b in snap["batches"] if b["commit"]),
     ))
-    print("findings:  %d (%d open)" % (len(snap["findings"]), len(open_findings)))
+    preflight = snap.get("preflight") or []
+    if preflight:
+        last = preflight[-1]
+        print("preflight: %s (%d checks)%s" % (
+            last["status"], len(last.get("checks") or []),
+            ", %d runs" % len(preflight) if len(preflight) > 1 else "",
+        ))
+
+    print("findings:  %d (%d open)%s" % (
+        len(snap["findings"]), len(open_findings), _severity_tally(snap["findings"]),
+    ))
     print("verify:    %d evidence, %d debt" % (
         len(snap["verification"]["evidence"]),
         len(snap["verification"]["debt"]),
@@ -688,6 +746,8 @@ def _cmd_status(args):
     print("approvals: %d live, %d revoked" % (
         len(live_approvals), len(snap["approvals"]) - len(live_approvals),
     ))
+    for line in _invocation_lines(snap.get("invocations") or []):
+        print("codex:     %s" % line)
 
     # A live lock is what a second invocation needs in order to offer resume-or-abort.
     holder = _read_lock(args.run_dir)
