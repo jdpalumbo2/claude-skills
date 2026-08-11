@@ -148,19 +148,30 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["t", "scope", "by", "plan_version", "plan_hash", "actions", "accepted_debt"],
+        "required": ["t", "scope", "by", "plan_version", "plan_hash", "actions", "accepted_debt", "revoked"],
         "properties": {
           "t": {"type": ["string", "null"]},
           "scope": {"type": "string"},
           "by": {"type": "string"},
           "plan_version": {"type": ["integer", "null"]},
-          "plan_hash": {"type": ["string", "null"], "description": "Must be a plan hash this run has recorded."},
+          "plan_hash": {"type": "string", "description": "A plan hash this run has recorded. Never null — an approval bound to nothing could never be revoked by an amendment."},
           "actions": {
             "type": "array",
             "description": "The exact external actions authorized.",
             "items": {"type": "object"}
           },
-          "accepted_debt": {"type": "array"}
+          "accepted_debt": {"type": "array"},
+          "revoked": {
+            "type": ["object", "null"],
+            "description": "Null while the approval stands. Set when an amendment supersedes the plan hash it is bound to: the approval is kept and marked, never dropped, so the run answers what happened from the manifest alone.",
+            "required": ["seq", "t", "superseded_hash", "superseding_hash"],
+            "properties": {
+              "seq": {"type": "integer"},
+              "t": {"type": ["string", "null"]},
+              "superseded_hash": {"type": "string"},
+              "superseding_hash": {"type": ["string", "null"]}
+            }
+          }
         }
       }
     },

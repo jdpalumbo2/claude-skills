@@ -21,6 +21,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import clodex_state  # noqa: E402
+import reducer  # noqa: E402
 from clodex_state import (  # noqa: E402
     ClodexStateError,
     ReducerInvariantError,
@@ -28,12 +29,41 @@ from clodex_state import (  # noqa: E402
     acquire_lock,
     append_event,
     atomic_write_snapshot,
+    break_lock,
     load_snapshot,
     rebuild,
 )
 
 MODULE = str(HERE / "clodex_state.py")
 TORN_LINE = '{"schema_version":1,"seq":2,"e":"stage'
+
+HOLD_LOCK_SCRIPT = (
+    "import sys; sys.path.insert(0, %r)\n"
+    "import clodex_state\n"
+    "with clodex_state.acquire_lock(sys.argv[1]):\n"
+    "    print('locked', flush=True)\n"
+    "    sys.stdin.readline()\n"
+) % str(HERE)
+
+# Each process hammers the same log. append_event holds the run lock, so a
+# loser must wait rather than be handed a seq someone else is already using.
+CONCURRENT_APPEND_SCRIPT = (
+    "import sys, time\n"
+    "sys.path.insert(0, %r)\n"
+    "import clodex_state\n"
+    "run_dir, label, count = sys.argv[1], sys.argv[2], int(sys.argv[3])\n"
+    "for index in range(count):\n"
+    "    for attempt in range(400):\n"
+    "        try:\n"
+    "            clodex_state.append_event(run_dir, {'e': 'finding:recorded',\n"
+    "                                               'id': '%%s-%%d' %% (label, index),\n"
+    "                                               'source': 'race'})\n"
+    "            break\n"
+    "        except clodex_state.RunLocked:\n"
+    "            time.sleep(0.005)\n"
+    "    else:\n"
+    "        raise SystemExit('gave up waiting for the lock: ' + label)\n"
+) % str(HERE)
 
 
 class StateTestCase(unittest.TestCase):
@@ -54,6 +84,17 @@ class StateTestCase(unittest.TestCase):
     def append_torn_line(self):
         with open(self.events, "a") as handle:
             handle.write(TORN_LINE)
+
+    def dead_pid(self):
+        """A PID that is genuinely gone, not merely improbable."""
+        finished = subprocess.Popen([sys.executable, "-c", "pass"])
+        finished.wait(timeout=30)
+        return finished.pid
+
+    def write_foreign_lock(self, pid):
+        self.lock.write_text(json.dumps({
+            "pid": pid, "acquired_at": "2026-08-10T00:00:00Z", "token": "someone-elses-token",
+        }))
 
 
 class EventLogTests(StateTestCase):
@@ -81,8 +122,22 @@ class EventLogTests(StateTestCase):
             append_event(self.run_dir, {"e": "run:opened"})
 
         # The durable write happened before append_event returned, not lazily at GC.
-        self.assertEqual(len(synced), 1)
+        self.assertTrue(synced)
         self.assertEqual(self.event_lines()[0]["seq"], 1)
+
+    def test_creating_the_log_fsyncs_its_directory(self):
+        real_fsync_dir = clodex_state._fsync_dir
+        synced = []
+
+        def spy(path):
+            synced.append(path)
+            return real_fsync_dir(path)
+
+        with mock.patch("clodex_state._fsync_dir", spy):
+            append_event(self.run_dir, {"e": "run:opened"})
+            self.assertEqual(synced, [str(self.run_dir)])  # new dirent made durable
+            append_event(self.run_dir, {"e": "stage:plan:entered"})
+            self.assertEqual(len(synced), 1)  # nothing new to make durable
 
     def test_torn_final_line_truncated(self):
         append_event(self.run_dir, {"e": "run:opened"})
@@ -107,6 +162,32 @@ class EventLogTests(StateTestCase):
         self.assertEqual([r["seq"] for r in self.event_lines()], [1, 2])
         self.assertEqual(rebuild(self.run_dir)["last_seq"], 2)
 
+    def test_append_after_a_newline_terminated_invalid_line_repairs_the_tail(self):
+        # Read and write must reach the same verdict on the final line, or
+        # appending pushes a line reads tolerate into the middle of the file.
+        append_event(self.run_dir, {"e": "run:opened"})
+        with open(self.events, "a") as handle:
+            handle.write(TORN_LINE + "\n")
+
+        with self.assertLogs("clodex.state", level="WARNING"):
+            seq = append_event(self.run_dir, {"e": "stage:plan:entered"})
+
+        self.assertEqual(seq, 2)
+        self.assertEqual([r["seq"] for r in self.event_lines()], [1, 2])
+        self.assertEqual(rebuild(self.run_dir)["last_seq"], 2)
+
+    def test_append_completes_a_final_line_that_only_lost_its_newline(self):
+        append_event(self.run_dir, {"e": "run:opened"})
+        raw = self.events.read_text()
+        self.events.write_text(raw.rstrip("\n"))  # valid event, newline gone
+
+        with self.assertLogs("clodex.state", level="WARNING"):
+            seq = append_event(self.run_dir, {"e": "stage:plan:entered"})
+
+        self.assertEqual(seq, 2)  # the complete record was kept, not discarded
+        self.assertEqual([r["e"] for r in self.event_lines()],
+                         ["run:opened", "stage:plan:entered"])
+
     def test_event_without_a_type_is_rejected_before_any_write(self):
         with self.assertRaises(ClodexStateError):
             append_event(self.run_dir, {"note": "no e field"})
@@ -119,7 +200,40 @@ class EventLogTests(StateTestCase):
 
     def test_event_vocabulary_matches_the_schema(self):
         schema = json.loads((HERE / "schemas" / "event.schema.json").read_text())
-        self.assertEqual(sorted(clodex_state._HANDLERS), sorted(schema["properties"]["e"]["enum"]))
+        self.assertEqual(sorted(reducer.HANDLERS), sorted(schema["properties"]["e"]["enum"]))
+
+
+class ConcurrencyTests(StateTestCase):
+    def test_concurrent_appends_never_reuse_a_seq(self):
+        writers, per_writer = 4, 5
+        env = dict(os.environ)
+        env.pop(clodex_state.LOCK_TOKEN_ENV, None)  # no delegated lock: real contention
+
+        processes = [
+            subprocess.Popen(
+                [sys.executable, "-c", CONCURRENT_APPEND_SCRIPT,
+                 str(self.run_dir), "w%d" % index, str(per_writer)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+            )
+            for index in range(writers)
+        ]
+        try:
+            for process in processes:
+                out, err = process.communicate(timeout=120)
+                self.assertEqual(process.returncode, 0, err or out)
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+
+        total = writers * per_writer
+        seqs = [record["seq"] for record in self.event_lines()]
+        self.assertEqual(seqs, list(range(1, total + 1)))  # unique and contiguous
+
+        snap = rebuild(self.run_dir)  # would raise if any seq had been reused
+        self.assertEqual(snap["last_seq"], total)
+        self.assertEqual(len(snap["findings"]), total)
+        self.assertFalse(self.lock.exists())
 
 
 class ReducerTests(StateTestCase):
@@ -128,8 +242,13 @@ class ReducerTests(StateTestCase):
             append_event(self.run_dir, event)
 
     def test_reducer_deterministic(self):
-        for e in ["run:opened", "stage:plan:entered", "plan:approved"]:
-            append_event(self.run_dir, {"e": e})
+        # plan:recorded precedes the approval because an approval must bind to a
+        # plan hash; the determinism assertion itself is unchanged.
+        for event in [{"e": "run:opened"},
+                      {"e": "stage:plan:entered"},
+                      {"e": "plan:recorded", "version": 1, "path": "docs/plans/x.md", "hash": "h1"},
+                      {"e": "plan:approved"}]:
+            append_event(self.run_dir, event)
         self.assertEqual(rebuild(self.run_dir), rebuild(self.run_dir))
 
     def test_run_opened_populates_the_snapshot(self):
@@ -203,12 +322,26 @@ class ReducerTests(StateTestCase):
         with self.assertRaises(ReducerInvariantError):
             rebuild(self.run_dir)
 
+    def test_release_state_outside_the_schema_is_rejected(self):
+        self.append_all(
+            {"e": "run:opened"},
+            {"e": "release:updated", "state": "banana"},
+        )
+        with self.assertRaises(ReducerInvariantError):
+            rebuild(self.run_dir)
+
     def test_approval_must_reference_an_existing_plan_hash(self):
         self.append_all(
             {"e": "run:opened"},
             {"e": "plan:recorded", "version": 1, "path": "docs/plans/x.md", "hash": "h1"},
             {"e": "plan:approved", "plan_hash": "not-a-real-hash"},
         )
+        with self.assertRaises(ReducerInvariantError):
+            rebuild(self.run_dir)
+
+    def test_approval_bound_to_no_plan_is_rejected(self):
+        # An approval with no plan hash could never be revoked by an amendment.
+        self.append_all({"e": "run:opened"}, {"e": "plan:approved"})
         with self.assertRaises(ReducerInvariantError):
             rebuild(self.run_dir)
 
@@ -223,6 +356,7 @@ class ReducerTests(StateTestCase):
         self.assertEqual(approvals[0]["plan_hash"], "h1")
         self.assertEqual(approvals[0]["plan_version"], 1)
         self.assertEqual(approvals[0]["scope"], "plan")
+        self.assertIsNone(approvals[0]["revoked"])
 
     def test_amendment_revokes_approvals_bound_to_the_superseded_hash(self):
         self.append_all(
@@ -232,11 +366,24 @@ class ReducerTests(StateTestCase):
             {"e": "plan:amended", "version": 2, "hash": "h2", "note": "scope change"},
         )
         snap = rebuild(self.run_dir)
-        self.assertEqual(snap["approvals"], [])
         self.assertEqual(snap["plan"]["version"], 2)
         self.assertEqual(snap["plan"]["hash"], "h2")
         self.assertEqual(len(snap["plan"]["amendments"]), 1)
         self.assertEqual(snap["plan"]["amendments"][0]["from_hash"], "h1")
+
+        # The approval is kept and marked, not dropped: the run must be able to
+        # say what happened from the manifest alone.
+        self.assertEqual(len(snap["approvals"]), 1)
+        revoked = snap["approvals"][0]["revoked"]
+        self.assertIsNotNone(revoked)
+        self.assertEqual(revoked["superseded_hash"], "h1")
+        self.assertEqual(revoked["superseding_hash"], "h2")
+        self.assertEqual(revoked["seq"], 4)
+
+        # An approval granted against the new hash stands.
+        append_event(self.run_dir, {"e": "approval:granted", "scope": "release-authorization"})
+        approvals = rebuild(self.run_dir)["approvals"]
+        self.assertEqual([a["revoked"] is None for a in approvals], [False, True])
 
     def test_batches_and_findings_track_by_id(self):
         self.append_all(
@@ -275,6 +422,14 @@ class ReducerTests(StateTestCase):
         self.assertIsNone(snap["stage"])
         self.assertEqual(snap["release"]["state"], "not-started")
 
+    def test_rebuilt_snapshots_satisfy_the_snapshot_schema(self):
+        self.append_all(
+            {"e": "run:opened", "run": "r-1", "lane": "feature"},
+            {"e": "batch:opened", "id": 1, "owned_paths": ["src/"]},
+        )
+        # consumers are handed something they can trust the schema for
+        reducer.validate(rebuild(self.run_dir), reducer.load_schema("snapshot.schema.json"))
+
 
 class LockTests(StateTestCase):
     def test_second_writer_blocked(self):
@@ -283,6 +438,7 @@ class LockTests(StateTestCase):
                 acquire_lock(self.run_dir)
 
         self.assertEqual(caught.exception.pid, os.getpid())
+        self.assertTrue(caught.exception.holder_alive)
         # holder timestamp is a parseable ISO-8601 instant
         datetime.fromisoformat(caught.exception.acquired_at.replace("Z", "+00:00"))
 
@@ -290,6 +446,7 @@ class LockTests(StateTestCase):
         with acquire_lock(self.run_dir):
             self.assertTrue(self.lock.exists())
         self.assertFalse(self.lock.exists())
+        self.assertNotIn(clodex_state.LOCK_TOKEN_ENV, os.environ)
         with acquire_lock(self.run_dir):  # a later run may take it
             pass
 
@@ -309,33 +466,86 @@ class LockTests(StateTestCase):
                 with self.assertRaises(RunLocked) as caught:
                     acquire_lock(self.run_dir)
                 self.assertEqual(caught.exception.pid, holder.pid)
+                self.assertTrue(caught.exception.holder_alive)
+
+                # the authoritative file is protected too, not just the snapshot
+                with self.assertRaises(RunLocked):
+                    append_event(self.run_dir, {"e": "run:opened"})
+                self.assertFalse(self.events.exists())
 
                 holder.stdin.write("release\n")
                 holder.stdin.flush()
-                self.assertEqual(holder.wait(timeout=10), 0)
+                self.assertEqual(holder.wait(timeout=30), 0)
             finally:
                 if holder.poll() is None:
                     holder.kill()
 
         self.assertFalse(self.lock.exists())
+        self.assertEqual(append_event(self.run_dir, {"e": "run:opened"}), 1)
+
+    def test_writes_are_re_entrant_for_the_lock_holder(self):
         with acquire_lock(self.run_dir):
-            pass
+            append_event(self.run_dir, {"e": "run:opened"})
+            append_event(self.run_dir, {"e": "stage:plan:entered"})
+            atomic_write_snapshot(self.run_dir, rebuild(self.run_dir))
+            self.assertTrue(self.lock.exists())  # still ours, never dropped mid-run
+
+        self.assertFalse(self.lock.exists())
+        self.assertEqual(load_snapshot(self.run_dir)["last_seq"], 2)
 
     def test_snapshot_write_refused_while_another_pid_holds_the_lock(self):
-        self.lock.write_text(json.dumps({"pid": 999999, "acquired_at": "2026-08-10T00:00:00Z"}))
+        pid = self.dead_pid()
+        self.write_foreign_lock(pid)
         with self.assertRaises(RunLocked) as caught:
             atomic_write_snapshot(self.run_dir, rebuild(self.run_dir))
-        self.assertEqual(caught.exception.pid, 999999)
+        self.assertEqual(caught.exception.pid, pid)
+        self.assertFalse(caught.exception.holder_alive)
         self.assertFalse(self.snapshot.exists())
 
+    def test_an_unreadable_lockfile_counts_as_locked(self):
+        self.lock.write_text("{not json")
+        with self.assertRaises(RunLocked):
+            append_event(self.run_dir, {"e": "run:opened"})
+        with self.assertRaises(RunLocked):
+            atomic_write_snapshot(self.run_dir, rebuild(self.run_dir))
+        self.assertFalse(self.events.exists())
+        self.assertFalse(self.snapshot.exists())
 
-HOLD_LOCK_SCRIPT = (
-    "import sys; sys.path.insert(0, %r)\n"
-    "import clodex_state\n"
-    "with clodex_state.acquire_lock(sys.argv[1]):\n"
-    "    print('locked', flush=True)\n"
-    "    sys.stdin.readline()\n"
-) % str(HERE)
+    def test_a_dead_holders_lock_is_never_broken_implicitly(self):
+        pid = self.dead_pid()
+        self.write_foreign_lock(pid)
+
+        with self.assertRaises(RunLocked) as caught:
+            append_event(self.run_dir, {"e": "run:opened"})
+        self.assertFalse(caught.exception.holder_alive)  # enough to decide resume-or-abort
+        self.assertTrue(self.lock.exists())
+
+        holder = break_lock(self.run_dir)  # the caller decides, explicitly
+        self.assertEqual(holder["pid"], pid)
+        self.assertFalse(self.lock.exists())
+        self.assertEqual(append_event(self.run_dir, {"e": "run:opened"}), 1)
+
+    def test_break_lock_refuses_a_live_holder_unless_forced(self):
+        with acquire_lock(self.run_dir):
+            with self.assertRaises(RunLocked):
+                break_lock(self.run_dir)
+            self.assertTrue(self.lock.exists())
+            break_lock(self.run_dir, force=True)
+            self.assertFalse(self.lock.exists())
+
+    def test_break_lock_on_an_unlocked_run_is_a_no_op(self):
+        self.assertIsNone(break_lock(self.run_dir))
+
+    def test_a_failed_lock_write_leaves_no_lockfile(self):
+        def boom(fd, data):
+            raise OSError("disk full")
+
+        with mock.patch("clodex_state.os.write", boom):
+            with self.assertRaises(OSError):
+                acquire_lock(self.run_dir)
+        self.assertFalse(self.lock.exists())
+        with acquire_lock(self.run_dir):  # the run is not wedged
+            pass
 
 
 class SnapshotTests(StateTestCase):
@@ -361,7 +571,7 @@ class SnapshotTests(StateTestCase):
 
         self.assertEqual(load_snapshot(self.run_dir), snap)
         self.assertEqual(json.loads(self.snapshot.read_text()), snap)
-        # temp file replaced, not left behind
+        # temp file replaced and lock released, nothing left behind
         self.assertEqual(sorted(p.name for p in self.run_dir.iterdir()),
                          ["events.ndjson", "run.json"])
 
@@ -416,6 +626,24 @@ class CliTests(StateTestCase):
         self.assertIn("plan", status.stdout)
         self.assertIn("feature", status.stdout)
 
+    def test_cli_append_works_under_the_callers_lock(self):
+        # The child has a different PID; ownership travels by token instead.
+        with acquire_lock(self.run_dir):
+            result = self.cli("append", str(self.run_dir), stdin='{"e": "run:opened"}')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "1")
+            self.assertEqual(json.loads(self.snapshot.read_text())["last_seq"], 1)
+            self.assertTrue(self.lock.exists())  # the child did not steal or drop it
+
+        self.assertFalse(self.lock.exists())
+
+    def test_cli_append_refused_under_a_foreign_lock(self):
+        self.write_foreign_lock(self.dead_pid())
+        result = self.cli("append", str(self.run_dir), stdin='{"e": "run:opened"}')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("locked", result.stderr)
+        self.assertFalse(self.events.exists())
+
     def test_cli_status_reports_a_live_lock(self):
         append_event(self.run_dir, {"e": "run:opened"})
         clean = self.cli("status", str(self.run_dir))
@@ -426,10 +654,46 @@ class CliTests(StateTestCase):
         self.assertEqual(locked.returncode, 0, locked.stderr)
         self.assertIn("lock:", locked.stdout)
         self.assertIn(str(os.getpid()), locked.stdout)
+        self.assertIn("running", locked.stdout)
+
+    def test_cli_unlock_removes_a_dead_holders_lock(self):
+        pid = self.dead_pid()
+        self.write_foreign_lock(pid)
+
+        result = self.cli("unlock", str(self.run_dir))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(pid), result.stdout)
+        self.assertFalse(self.lock.exists())
+
+        empty = self.cli("unlock", str(self.run_dir))
+        self.assertEqual(empty.returncode, 0, empty.stderr)
+        self.assertIn("no lock", empty.stdout)
+
+    def test_cli_unlock_refuses_a_live_holder(self):
+        with subprocess.Popen(
+            [sys.executable, "-c", HOLD_LOCK_SCRIPT, str(self.run_dir)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        ) as holder:
+            try:
+                if holder.stdout.readline().strip() != "locked":
+                    holder.kill()
+                    self.fail("lock holder never started: %s" % holder.stderr.read())
+
+                result = self.cli("unlock", str(self.run_dir))
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("running", result.stderr)
+                self.assertTrue(self.lock.exists())
+
+                holder.stdin.write("release\n")
+                holder.stdin.flush()
+                self.assertEqual(holder.wait(timeout=30), 0)
+            finally:
+                if holder.poll() is None:
+                    holder.kill()
 
     def test_cli_reports_bad_stdin_on_stderr(self):
         result = self.cli("append", str(self.run_dir), stdin="not json")
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 1)
         self.assertTrue(result.stderr.strip())
         self.assertFalse(self.events.exists())
 
@@ -438,11 +702,37 @@ class CliTests(StateTestCase):
         self.cli("append", str(self.run_dir), stdin='{"e": "stage:build:entered"}')
         result = self.cli("append", str(self.run_dir), stdin='{"e": "stage:plan:entered"}')
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 1)
         self.assertTrue(result.stderr.strip())
         # the illegal event never entered the log, so the run stays readable
         self.assertEqual(rebuild(self.run_dir)["last_seq"], 2)
         self.assertEqual(rebuild(self.run_dir)["stage"], "build")
+
+    def test_cli_refuses_an_event_that_would_break_the_snapshot(self):
+        self.cli("append", str(self.run_dir), stdin='{"e": "run:opened"}')
+        result = self.cli("append", str(self.run_dir),
+                          stdin='{"e": "release:updated", "state": "banana"}')
+
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(result.stderr.strip())
+        # a payload the snapshot schema rejects must not enter an append-only log
+        self.assertEqual(rebuild(self.run_dir)["last_seq"], 1)
+        self.assertEqual(json.loads(self.snapshot.read_text())["last_seq"], 1)
+
+        healthy = self.cli("append", str(self.run_dir), stdin='{"e": "stage:plan:entered"}')
+        self.assertEqual(healthy.returncode, 0, healthy.stderr)
+
+    def test_cli_append_signals_a_logged_event_with_a_stale_snapshot(self):
+        # A non-zero exit must say whether retrying would double-append.
+        self.cli("append", str(self.run_dir), stdin='{"e": "run:opened"}')
+        self.snapshot.unlink()
+        self.snapshot.mkdir()  # os.replace onto a directory fails, the append does not
+
+        result = self.cli("append", str(self.run_dir), stdin='{"e": "stage:plan:entered"}')
+        self.assertEqual(result.returncode, clodex_state.EXIT_PARTIAL)
+        self.assertEqual(result.stdout.strip(), "")  # no seq: the command did not succeed
+        self.assertIn("Do not retry", result.stderr)
+        self.assertEqual(rebuild(self.run_dir)["last_seq"], 2)  # the event is durable
 
 
 if __name__ == "__main__":
