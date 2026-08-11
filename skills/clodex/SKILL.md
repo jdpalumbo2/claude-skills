@@ -183,12 +183,19 @@ broken implicitly; breaking it is this skill's decision, made with the user.
 **The resume offer.** From `status` (and `rebuild` for fields `status` does not
 print, such as `brief`), tell the user in one message: the run id and lane, the
 brief, the current stage, plan version and amendment count, open findings,
-verification debt, release state and any pending step. Then offer:
+verification debt, release state and any pending step. Then offer these three —
+**and lead with the one the situation calls for, not always Resume**:
 
+- **Close** → append `{"e": "run:closed"}`. Lead with this, and say plainly that
+  it is the answer, whenever the run reached you as a **hand-back from a stage
+  skill asking for closure** — `clodex-verify` does that when verification
+  fails, so a follow-on run can carry this run's id as its `parent` (§6). Such a
+  run is still open at its stage, so offering Resume first walks the user
+  straight back into the loop the hand-back exists to escape. Follow the
+  handing-back skill's stated procedure; do not improvise a substitute here.
 - **Resume** → hand to the stage skill for the current stage (§6 table). If
   `release:` shows a pending step, do **not** retry it here: clodex-ship
   reconciles pending steps against reality before any retry.
-- **Close** → append `{"e": "run:closed"}`.
 - **Abandon** → append `{"e": "release:updated", "state": "abandoned"}`, then
   `{"e": "run:closed"}`.
 
@@ -487,7 +494,7 @@ shell interpolation — the brief is verbatim user text and will contain quotes:
 
 ```json
 {"e": "run:opened",
- "run": "r-2026-08-10-a",
+ "run": "r-2026-08-10-b",
  "parent": null,
  "repo": "/absolute/path/to/repo",
  "branch": "main",
@@ -497,7 +504,19 @@ shell interpolation — the brief is verbatim user text and will contain quotes:
          "dirty_at_start": ["src/app.ts", "docs/plans/older-draft.md"]}}
 ```
 
-`dirty_at_start` is file paths only — never `"docs/"` — for the reasons in §5A.
+Two fields need a decision rather than a copy:
+
+- **`parent`** is `null` for ordinary new work, but **not** when the ask reached
+  you as a hand-back from a stage skill naming a prior run. A run cannot be sent
+  backwards — stage order is monotonic — so a stage that needs earlier work
+  redone closes its run and asks for a follow-on; `clodex-verify` does exactly
+  this when verification fails. In that case `parent` is the closed run's id,
+  copied verbatim from the hand-back sentence: `"parent": "r-2026-08-10-a"`. It
+  is the only link between the two runs, so a `null` here silently orphans the
+  history. The §5B worktree path is the same shape: the new run's `parent` is the
+  run you closed in the dirty checkout.
+- **`dirty_at_start`** is file paths only — never `"docs/"` — for the reasons in
+  §5A.
 
 ```bash
 python3 "$STATE" append "$RUN_DIR" < "$RUN_DIR/run-opened.json"   # stdin, never argv
