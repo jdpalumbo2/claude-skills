@@ -370,9 +370,28 @@ and handle the audit part manually.
 ### A. At open — acknowledge what is already dirty
 
 ```bash
-START_HEAD="$(git rev-parse HEAD)"   # recorded as git.start_head
-git status --porcelain               # the dirty snapshot: modified AND untracked
+START_HEAD="$(git rev-parse HEAD)"                # recorded as git.start_head
+git status --porcelain --untracked-files=all      # the dirty snapshot
 ```
+
+`--untracked-files=all` (`-uall`) is not optional. Plain `git status --porcelain`
+collapses an untracked directory into one entry — `?? docs/` — but everything
+downstream treats `git.dirty_at_start` as a list of **files**, and a directory
+entry breaks the change boundary in both directions. §5B asks whether a dirty
+path *is* an owned path or sits under one, which an acknowledged **ancestor**
+like `docs/` never satisfies: a batch owning `docs/plans/` sees no overlap, and
+the user's pre-existing `docs/plans/older-draft.md` lands in the batch commit —
+the exact outcome this section exists to prevent. Compared the other way, every
+file under an acknowledged directory reads as an unowned stray and falsely
+halts the run. `-uall` records the files themselves, so neither happens.
+
+Record each entry as a **repo-relative file path with the status prefix
+stripped**. Porcelain lines are `XY<space>path`, so take everything from the
+fourth character on: ` M src/app.ts` → `src/app.ts`, `?? docs/plans/draft.md` →
+`docs/plans/draft.md`. No status letters, no trailing slashes, no directories.
+For a staged rename (`R  old -> new`) record the new path. A path containing a
+space or a quote comes back C-quoted (`"a b.txt"`); if you hit one, re-run with
+`-z` and split the NUL-separated output instead of unquoting by hand.
 
 Show the user every dirty path. They acknowledge the list, or **the run does not
 open**. The acknowledged paths go into `run:opened` as `git.dirty_at_start`
@@ -390,8 +409,12 @@ and no plan is recorded"* — until `clodex-plan` has recorded a plan.
 
 A **batch** is one bounded unit of implementation work with a declared list of
 **owned paths** — the only paths that batch may touch. `clodex-plan` declares
-them. A dirty path overlaps when it *is* an owned path or sits under one.
-There are exactly **three legal outcomes**:
+them. A dirty path overlaps when it *is* an owned path or sits under one, which
+is a sound test only because §A recorded files: if you find a directory entry in
+`git.dirty_at_start` — an older run, or a hand-edited snapshot — expand it with
+`git status --porcelain --untracked-files=all` before comparing, or an ancestor
+entry will match nothing and let a pre-existing file through. There are exactly
+**three legal outcomes**:
 
 1. **Fold with acknowledgment.** The pre-existing edit will end up inside a
    clodex commit, so capture it into the run directory *first* and get the user
@@ -471,8 +494,10 @@ shell interpolation — the brief is verbatim user text and will contain quotes:
  "brief": "<the ask, verbatim>",
  "lane": "feature",
  "git": {"start_head": "<git rev-parse HEAD>",
-         "dirty_at_start": ["path/one", "path/two"]}}
+         "dirty_at_start": ["src/app.ts", "docs/plans/older-draft.md"]}}
 ```
+
+`dirty_at_start` is file paths only — never `"docs/"` — for the reasons in §5A.
 
 ```bash
 python3 "$STATE" append "$RUN_DIR" < "$RUN_DIR/run-opened.json"   # stdin, never argv
