@@ -108,6 +108,11 @@ case "${STUB_MODE:-complete}" in
         printf 'codex: stream disconnected before completion\n' >&2
         exit "${STUB_EXIT_CODE:-4}"
         ;;
+    extra-key)
+        # Well-formed JSON claiming success, but not the shape the runner asked
+        # for — a model wandering off the output schema it was given.
+        printf '%s\n' '{"status":"complete","summary":"done","findings":[],"notes":"chatty extra key"}' > "$out"
+        ;;
     partial)
         printf '%s\n' '{"status":"partial","summary":"stub ran out of room","findings":[{"severity":"high","summary":"stub finding","detail":"stub detail","location":"stub.py:1"}]}' > "$out"
         ;;
@@ -561,6 +566,99 @@ case_j() {
     pass "$name"
 }
 
+# ---------------------------------------------------------------------------
+# (k) capturing the runner's stdout must not wait on the heartbeat
+# ---------------------------------------------------------------------------
+case_k() {
+    local name="k  a caller capturing stdout gets the status line without stalling"
+    local log="$TMP/log/k" state="$TMP/state/k" prompt="$TMP/prompt-k.md"
+    printf 'Review the plan.\n' > "$prompt"
+
+    # Command substitution keeps reading until every process holding the write
+    # end of the pipe is gone — a heartbeat sleep that outlives the run holds
+    # it, and no amount of file-redirected output would show that.
+    local began ended elapsed result rc=0
+    began="$(date +%s)"
+    result="$(STUB_LOG_DIR="$log" CLODEX_RUNNER_STATE_DIR="$state" \
+              STUB_MODE=slow STUB_SLOW_SECONDS=1 CLODEX_HEARTBEAT_SECONDS=15 \
+              "$RUNNER" --role advisor --repo "$REPO" --prompt-file "$prompt" \
+              2> "$TMP/k.err")" || rc=$?
+    ended="$(date +%s)"
+    elapsed=$((ended - began))
+
+    if [ "$rc" -ne 0 ]; then
+        fail "$name" "runner exited $rc; stderr: $(tail -3 "$TMP/k.err" | tr '\n' ' ')"
+        return
+    fi
+    if [ "$elapsed" -ge 10 ]; then
+        fail "$name" "capturing stdout took ${elapsed}s for a ~1s run — something still holds the caller's pipe open"
+        return
+    fi
+    case "$result" in
+        'complete '/*) ;;
+        *) fail "$name" "expected a 'complete <path>' status line, got: $result"; return ;;
+    esac
+    pass "$name"
+}
+
+# ---------------------------------------------------------------------------
+# (l) a model report that drifts off the output schema is not a result
+# ---------------------------------------------------------------------------
+case_l() {
+    local name="l  model report off the output schema => failed, exit non-zero"
+    local log="$TMP/log/l" state="$TMP/state/l" prompt="$TMP/prompt-l.md"
+    printf 'Review the plan.\n' > "$prompt"
+
+    local rc=0
+    STUB_LOG_DIR="$log" CLODEX_RUNNER_STATE_DIR="$state" STUB_MODE=extra-key \
+        "$RUNNER" --role plan-reviewer --repo "$REPO" --prompt-file "$prompt" \
+        > "$TMP/l.out" 2> "$TMP/l.err" || rc=$?
+
+    if [ "$rc" -eq 0 ]; then
+        fail "$name" "runner exited 0 on a report that does not match the schema"
+        return
+    fi
+    local env
+    env="$(sole_envelope "$state")" || { fail "$name" "no single envelope in $state"; return; }
+    local status
+    status="$(json_get "$env" status)"
+    if [ "$status" != "failed" ]; then
+        fail "$name" "envelope status is '$status', expected 'failed'"
+        return
+    fi
+    if ! json_get "$env" error | grep -qi 'schema'; then
+        fail "$name" "envelope does not record why it failed: $(json_get "$env" error)"
+        return
+    fi
+    pass "$name"
+}
+
+# ---------------------------------------------------------------------------
+# (m) a rejected resume must not touch the repo it was pointed at
+# ---------------------------------------------------------------------------
+case_m() {
+    local name="m  a rejected resume creates nothing in the repo it named"
+    local log="$TMP/log/m" prompt="$TMP/prompt-m.md" repo="$TMP/repo-m"
+    mkdir -p "$repo"
+    printf 'Review the plan.\n' > "$prompt"
+
+    local rc=0
+    env -u CLODEX_RUNNER_STATE_DIR STUB_LOG_DIR="$log" STUB_MODE=complete \
+        "$RUNNER" --role advisor --repo "$repo" \
+        --resume advisor-19990101T000000Z-aaaaaa --prompt-file "$prompt" \
+        > /dev/null 2> "$TMP/m.err" || rc=$?
+
+    if [ "$rc" -eq 0 ]; then
+        fail "$name" "resuming an invocation that does not exist exited 0"
+        return
+    fi
+    if [ -e "$repo/.clodex" ]; then
+        fail "$name" "the rejected resume created $repo/.clodex"
+        return
+    fi
+    pass "$name"
+}
+
 case_a
 case_b
 case_c
@@ -571,6 +669,9 @@ case_g
 case_h
 case_i
 case_j
+case_k
+case_l
+case_m
 
 printf '\n'
 if [ "$FAILURES" -ne 0 ]; then

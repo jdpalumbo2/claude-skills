@@ -176,16 +176,24 @@ esac
 
 STATE_ROOT="${CLODEX_RUNNER_STATE_DIR:-$REPO_ABS/.clodex/runner}"
 STATE_DIR="$STATE_ROOT/$ROLE"
+
+# A resume is checked against the recorded invocation BEFORE anything is
+# created: a mistyped --repo or --role must not leave an empty state directory
+# behind in a repo it does not belong to.
+if [ -n "$RESUME_ID" ]; then
+    META_FILE="$STATE_DIR/$RESUME_ID.meta"
+    [ -f "$META_FILE" ] || die "no recorded $ROLE invocation $RESUME_ID in $STATE_DIR" 1
+    META_REPO="$(meta_get repo "$META_FILE")"
+    [ "$META_REPO" = "$REPO_ABS" ] || \
+        die "$RESUME_ID ran against $META_REPO, not $REPO_ABS" 1
+fi
+
 mkdir -p "$STATE_DIR"
 STATE_DIR="$(abs_dir "$STATE_DIR")" || die "cannot resolve state dir: $STATE_ROOT/$ROLE"
 
 if [ -n "$RESUME_ID" ]; then
     INVOCATION_ID="$RESUME_ID"
     META_FILE="$STATE_DIR/$INVOCATION_ID.meta"
-    [ -f "$META_FILE" ] || die "no recorded $ROLE invocation $INVOCATION_ID in $STATE_DIR" 1
-    META_REPO="$(meta_get repo "$META_FILE")"
-    [ "$META_REPO" = "$REPO_ABS" ] || \
-        die "$INVOCATION_ID ran against $META_REPO, not $REPO_ABS" 1
     MODEL="${CODEX_MODEL:-$(meta_get model "$META_FILE")}"
     EFFORT="${CODEX_EFFORT:-$(meta_get effort "$META_FILE")}"
     SANDBOX="$(meta_get sandbox "$META_FILE")"
@@ -254,15 +262,40 @@ last_event_kind() {
     printf '%s' "${kind:-no events yet}"
 }
 
+# Still running, as opposed to gone or reaped-but-not-yet-collected. `kill -0`
+# alone says yes to a zombie, which would buy one bogus tick after codex exits.
+process_alive() {
+    local state
+    state="$(ps -o state= -p "$1" 2>/dev/null || true)"
+    case "$state" in
+        ''|Z*) return 1 ;;
+        *)     return 0 ;;
+    esac
+}
+
 # A stalled run and a slow one look identical without this. Stderr only: it
 # must never reach stdout or the envelope.
+#
+# The ticker owns its sleep instead of running it in the foreground. A killed
+# ticker used to leave that `sleep` orphaned, and the orphan kept the fds it
+# inherited — so a caller capturing the runner's stdout (which is how every
+# clodex skill reads the status line) waited for the sleep, not for the run.
+# Here the sleep is a child the TERM handler can kill, and the ticker gives up
+# the caller's stdout the moment it starts.
 start_heartbeat() {
     [ "$HEARTBEAT_SECONDS" -gt 0 ] || return 0
     local began
     began="$(date +%s)"
     (
-        while sleep "$HEARTBEAT_SECONDS"; do
-            kill -0 "$CODEX_PID" 2>/dev/null || break
+        exec >/dev/null
+        napping=""
+        trap 'if [ -n "$napping" ]; then kill "$napping" 2>/dev/null || true; fi; exit 0' INT TERM
+        while :; do
+            sleep "$HEARTBEAT_SECONDS" &
+            napping=$!
+            wait "$napping" || true
+            napping=""
+            process_alive "$CODEX_PID" || break
             printf 'run-codex.sh: %s still running — %ss elapsed, last event: %s\n' \
                 "$INVOCATION_ID" "$(( $(date +%s) - began ))" "$(last_event_kind)" >&2
         done
