@@ -473,8 +473,21 @@ What comes back:
 |---|---|---|
 | `clean — the contract held` | nothing changed outside the owned paths except dirt the run already acknowledged | §8 |
 | `STOP` + a path marked **NOT owned by this batch** | the implementer strayed | Stop. This is a scope change, and scope changes are the user's call. Capture it, show it, ask (below). |
-| a path marked **acknowledged dirt** | it was already dirty when the run opened, or sits under a directory that was | Leave it alone. It is not yours to stage, revert, or clean, and it is **never** a target of the restore below. The check cannot tell "still only the user's edit" from "the implementer edited it too"; if you suspect the latter, `git diff "$(python3 "$STATE" rebuild "$RUN_DIR" \| python3 -c 'import json,sys;print(json.load(sys.stdin)["git"]["start_head"])')" -- <path>` shows everything that happened to it since the run opened. |
+| a path marked **acknowledged dirt** | it was already dirty when the run opened, or sits under a directory that was | Leave it alone. It is not yours to stage, revert, or clean, and it is **never** a target of the restore below. The check cannot tell "still only the user's edit" from "the implementer edited it too" — the diff below answers that. |
 | `.clodex/profile.json` | the router repaired the profile and did not commit it, or the user edited it | Leave it, and say so in chat. It is the one file `git check-ignore` lets through, and it is never yours to stage (§2). |
+
+Read-only, for an acknowledged path you suspect the implementer also touched —
+everything that happened to it since the run opened:
+
+```bash
+git diff "$(python3 "$STATE" rebuild "$RUN_DIR" |
+            python3 -c 'import json,sys;print(json.load(sys.stdin)["git"]["start_head"])')" \
+    -- <the acknowledged path>
+```
+
+More there than the user's own edit means treat it as a stray after all. It
+still never becomes a target of the restore below: their edit is mixed into that
+file, so undoing the implementer's part is theirs to do, not yours.
 
 For a path the check printed as **NOT owned by this batch** — and only those —
 capture the evidence before anything changes:
@@ -488,18 +501,40 @@ Then put it to the user with the diff and exactly two ways forward: **the stray
 edit is needed** — that is a scope change, so amend the plan (§11) to own the
 path, and the work continues; or **it is not needed** — restore those paths and
 re-run the batch. Restore only after they say so, and only paths the check itself
-listed as `NOT owned by this batch`:
+listed as `NOT owned by this batch`.
 
-Which of the two commands applies is the `[XY]` the check printed beside the
-path: **`[??]` is untracked** — git has never seen it, so there is nothing to
-restore it to and it is moved aside; **anything else is tracked**, and
-`git checkout` puts the committed content back.
+Which command applies is the `[XY]` the check printed beside the path:
+
+| `[XY]` | What it is | Restore with |
+|---|---|---|
+| `[??]` | untracked — git has never seen it, so there is nothing to restore it *to* | `mv` it aside |
+| `[R ]`, `[RM]`, `[C ]` | a **rename or copy the implementer staged**, and this is its origin path | unstage the rename first, then restore |
+| anything else | tracked, and modified in place | `git checkout --` puts the committed content back |
 
 ```bash
 mkdir -p "$RUN_DIR/stray"
-git checkout -- <stray paths the check printed with a tracked [XY]>
+git checkout -- <stray paths the check printed with a plain tracked [XY]>
 mv <stray path the check printed as [??]> "$RUN_DIR/stray/"    # never rm
 ```
+
+**A rename origin needs its own three steps, and `git checkout` alone is not one
+of them.** When the implementer moved a file *into* the contract from outside it,
+the origin path no longer exists in the index or the tree, so
+`git checkout -- <origin>` fails with *"pathspec … did not match any file(s)
+known to git"* and leaves you nowhere. Undo the rename in the index first — the
+operation that actually restores it:
+
+```bash
+mkdir -p "$RUN_DIR/stray"
+git reset -q HEAD -- <origin path> <the new path it was moved to>   # index only, never the tree
+git checkout -- <origin path>                    # now it exists in the index again
+mv <the new path> "$RUN_DIR/stray/"              # the moved copy, untracked after the reset
+```
+
+`git reset` with a pathspec touches only the index — it cannot discard a working
+tree change, so it cannot reach anybody's edits. After it, the origin reads as
+deleted and the destination as untracked, which is exactly the state the two
+lines below it expect.
 
 **Do not select these paths by hand, and do not re-derive them.** "Not in
 `dirty_at_start`" is not the test — a file inside an acknowledged *directory* is
@@ -684,13 +719,21 @@ reviewed delta, so anything you change between the verdict and the commit makes
 the review stale and sends you back to §9.
 
 ```bash
-git diff --quiet -- src/thing/ docs/plans/<plan file>.md \
-  || echo "owned paths changed since you staged them — the review is stale, back to §9"
-git commit -m "<type>(<scope>): <the batch's Done when, in one line>" \
-           -- src/thing/ docs/plans/<plan file>.md      # the batch's owned paths
-COMMIT="$(git rev-parse HEAD)"
-git show --stat --oneline "$COMMIT"     # read it: owned paths only, nothing else
+if git diff --quiet -- src/thing/ docs/plans/<plan file>.md; then
+    git commit -m "<type>(<scope>): <the batch's Done when, in one line>" \
+               -- src/thing/ docs/plans/<plan file>.md      # the batch's owned paths
+    COMMIT="$(git rev-parse HEAD)"
+    git show --stat --oneline "$COMMIT"   # read it: owned paths only, nothing else
+else
+    echo "STOP: an owned path changed after you staged it — the delta you reviewed"
+    echo "      is not the delta about to land. Back to §9."
+fi
 ```
+
+The guard is an `if`, not a warning before an unconditional commit. `git diff
+--quiet … || echo …` followed by `git commit` prints the warning **and** makes
+the stale commit, which then has to be undone — and undoing a commit is a worse
+position than never making one.
 
 **Name the paths on the commit too, not just on the `git add`.** A bare `git
 commit -m` commits the whole index, and the index is not only yours: a user who
@@ -703,8 +746,8 @@ paths and nothing else, and their staged work stays staged.
 contents and disregards what you staged, so a file edited after §9 produced its
 diff is committed in its newer form, and `git show --stat` will not tell you:
 the file list is identical either way, and only the content moved. The guard
-makes that impossible to miss — it exits non-zero exactly when an owned path has
-unstaged changes, meaning the delta you reviewed is not the delta about to land.
+holds the commit back exactly when an owned path has unstaged changes, meaning
+the delta you reviewed is not the delta about to land.
 
 Never `git add -A`, `git add .`, or `git commit -a`, and never `git add <dir>`
 when that directory holds files the batch does not own. The change boundary
