@@ -241,7 +241,35 @@ material amendment requires a fresh round; every fix to a substantive finding is
 material; every round finds something substantive. There is no configuration of
 these two rules that terminates while the reviewer keeps finding true things.
 
-**13. Round-number bookkeeping is entirely manual.** Finding ids must be
+**13. The change boundary is one-directional, and it was breached — from the
+other side.** This is the most serious finding after the convergence ratchet,
+and it is not hypothetical: it happened, unprompted, during the run.
+
+While the pilot was mid-review, the concurrent session in the same repo made a
+sweeping commit and **captured the run's in-progress plan file into its own
+commit**, at plan version 4, alongside its own unrelated change. The provenance
+is unambiguous because the committed blob hashes to exactly the value the run's
+manifest had recorded for v4. The run subsequently amended to v5, so the plan
+now exists as tracked history at a superseded version under another author,
+while the current version sits uncommitted on disk.
+
+clodex spends real effort ensuring a run never commits the user's work. Nothing
+whatsoever protects the run's work from the user — no lock, no warning, no
+detection. A run can be silently forked out from under itself.
+
+The damage was limited to the plan file. **Run state survived only because of
+the workaround in incident 1.** The nested ignore file meant the sweeping commit
+could not touch `events.ndjson`, five prompt files, or the runner envelopes;
+had preflight's literal remedy been used and left uncommitted, all 56 events
+would have landed in the repo under someone else's commit. The workaround was
+not merely adequate — it turned out to be load-bearing.
+
+**Fix:** at minimum, `clodex-build` and `clodex-ship` should re-hash the plan
+file against `plan.hash` and check whether run-owned paths became tracked by a
+commit the run did not make. Detecting this is cheap; discovering it at ship is
+not.
+
+**14. Round-number bookkeeping is entirely manual.** Finding ids must be
 hand-namespaced `r<N>-` or the reducer rejects the collision — correct, but it
 means the only record of which round a finding came from is a string convention
 the operator has to remember.
@@ -252,10 +280,12 @@ the operator has to remember.
 
 Worth recording, because it is most of the system.
 
-- **The change boundary held perfectly.** 730 dirty paths belonging to another
-  session, across 60+ minutes and 6 commits' worth of temptation — nothing of
-  theirs was staged, moved, or committed. The pathspec discipline
-  (`git commit -- <paths>`) and the ban on `git add -A` are the reason.
+- **The change boundary held perfectly in the direction it guards.** 730 dirty
+  paths belonging to another session — nothing of theirs was staged, moved, or
+  committed by this run, and their 13 modified files were still exactly as found
+  when they committed them themselves. The pathspec discipline
+  (`git commit -- <paths>`) and the ban on `git add -A` are the reason. (The
+  reverse direction is unguarded — see incident 13.)
 - **The engine refused everything it should.** Approvals bind to the current
   plan hash; a second `plan:recorded` is refused; duplicate finding ids are
   refused. No invariant had to be enforced by care.
