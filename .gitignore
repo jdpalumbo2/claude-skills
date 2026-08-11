@@ -1,1 +1,5 @@
 .DS_Store
+
+# clodex: run state is never committed, the repo profile always is
+.clodex/*
+!.clodex/profile.json
