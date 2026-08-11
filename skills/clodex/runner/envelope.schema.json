@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "clodex/envelope.schema.json",
+  "title": "clodex codex result envelope",
+  "description": "The result of one Codex invocation made through skills/clodex/runner/run-codex.sh. The runner authors every field except the contents of $defs.model_report: that sub-schema is what the runner hands to `codex --output-schema`, so it is the only part the model writes. The runner folds the model's report in, stamps finding ids, reconciles the final status against the process outcome, and validates this whole document. A stage may transition only on a valid envelope whose status is \"complete\".",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "invocation_id",
+    "role",
+    "status",
+    "inputs",
+    "findings",
+    "exit",
+    "codex",
+    "output"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "description": "Envelope contract version. 1 for clodex v0.1."
+    },
+    "invocation_id": {
+      "type": "string",
+      "description": "Runner-generated: <role>-<UTC timestamp>-<random>. Prefixes every state file of this invocation and is the argument to run-codex.sh --resume."
+    },
+    "role": {
+      "type": "string",
+      "description": "Which Codex role ran. Determines the sandbox and the default model.",
+      "enum": ["plan-reviewer", "implementer", "code-reviewer", "advisor"]
+    },
+    "status": {
+      "type": "string",
+      "description": "Reconciled by the runner, never taken from the model: a killed process is interrupted, a non-zero codex exit is failed, a missing or malformed model report is failed, a model-reported partial is partial. Only a clean exit plus a model-reported complete is complete.",
+      "enum": ["complete", "partial", "failed", "interrupted"]
+    },
+    "model_status": {
+      "type": ["string", "null"],
+      "description": "What the model claimed about its own completeness, kept for auditing the reconciliation above. Null when there is no usable model report.",
+      "enum": ["complete", "partial", null]
+    },
+    "summary": {
+      "type": ["string", "null"],
+      "description": "The model's own summary of the work. Prose — never a control signal."
+    },
+    "error": {
+      "type": ["string", "null"],
+      "description": "Why the runner failed this invocation closed, when it did. Runner-authored."
+    },
+    "inputs": {
+      "type": "array",
+      "description": "The input artifacts this invocation was given, hashed by the runner: the prompt file plus every --input path. Lets a later stage prove the reviewed artifact has not changed.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {"type": "string"},
+          "sha256": {"type": "string"}
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "The model's findings, each stamped by the runner with an id that is unique within this invocation.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "summary", "detail", "location"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Runner-assigned: F001, F002, ... in the order the model reported them."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["blocker", "high", "medium", "low", "info"]
+          },
+          "summary": {"type": "string"},
+          "detail": {"type": "string"},
+          "location": {"type": "string"}
+        }
+      }
+    },
+    "exit": {
+      "type": "object",
+      "description": "How the codex process ended. Entirely runner-observed.",
+      "additionalProperties": false,
+      "required": ["code", "signal", "started_at", "ended_at", "duration_ms"],
+      "properties": {
+        "code": {
+          "type": ["integer", "null"],
+          "description": "Wait status of the codex process (128+N when it died on signal N)."
+        },
+        "signal": {
+          "type": ["integer", "null"],
+          "description": "Signal number that killed the process, else null."
+        },
+        "started_at": {"type": "string", "description": "ISO-8601 UTC."},
+        "ended_at": {"type": "string", "description": "ISO-8601 UTC."},
+        "duration_ms": {"type": ["integer", "null"]}
+      }
+    },
+    "codex": {
+      "type": "object",
+      "description": "What was asked of codex, and the handle needed to continue it.",
+      "additionalProperties": false,
+      "required": ["model", "effort", "sandbox", "session_id", "resumed"],
+      "properties": {
+        "model": {"type": "string"},
+        "effort": {"type": "string"},
+        "sandbox": {
+          "type": "string",
+          "enum": ["read-only", "workspace-write", "danger-full-access"]
+        },
+        "session_id": {
+          "type": ["string", "null"],
+          "description": "Codex session id captured from the event stream. Null means this invocation cannot be resumed."
+        },
+        "resumed": {
+          "type": "boolean",
+          "description": "True when this envelope is the result of run-codex.sh --resume."
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "description": "Where the full output of this invocation lives on disk.",
+      "additionalProperties": false,
+      "required": ["events", "stderr", "model_report", "state_dir"],
+      "properties": {
+        "events": {
+          "type": "string",
+          "description": "codex --json event stream (NDJSON), appended across resumes."
+        },
+        "stderr": {"type": "string"},
+        "model_report": {
+          "type": "string",
+          "description": "Where codex was told to write the model's structured report. Absent on disk when the run produced none."
+        },
+        "state_dir": {"type": "string"}
+      }
+    }
+  },
+  "$defs": {
+    "model_report": {
+      "type": "object",
+      "description": "The model-authored part of the envelope, and the only part of it Codex is asked to produce. run-codex.sh exports this sub-schema to a file and passes it to `codex --output-schema`; the runner supplies every other field itself. Report only what you determined; the runner already knows the run's identity, timing and inputs.",
+      "additionalProperties": false,
+      "required": ["status", "summary", "findings"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "Your own assessment: \"complete\" only if you finished the whole assignment you were given; \"partial\" if you stopped early, ran short of room, or left any part of it undone.",
+          "enum": ["complete", "partial"]
+        },
+        "summary": {
+          "type": "string",
+          "description": "A few sentences on what you did and what you concluded."
+        },
+        "findings": {
+          "type": "array",
+          "description": "Every issue you are reporting, most severe first. Empty when you found none.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["severity", "summary", "detail", "location"],
+            "properties": {
+              "severity": {
+                "type": "string",
+                "enum": ["blocker", "high", "medium", "low", "info"]
+              },
+              "summary": {
+                "type": "string",
+                "description": "One line: what is wrong."
+              },
+              "detail": {
+                "type": "string",
+                "description": "Why it is wrong and what it breaks. Empty string if the summary says it all."
+              },
+              "location": {
+                "type": "string",
+                "description": "file:line, or a section heading. Empty string when the finding is not tied to a place."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
