@@ -2,8 +2,9 @@
 # Tests for the clodex Codex runner.
 #
 # The real `codex` is never invoked: a stub binary is put first on PATH for the
-# life of this process only, and everything the tests write lives under one
-# temp dir that is removed on exit.
+# life of this process only — and the suite refuses to run unless it verifies
+# that the stub really shadows the real binary. Everything the tests write
+# lives under one temp dir that is removed on exit.
 #
 # Usage: ./test_runner.sh      # exit 0 only if every case passes
 
@@ -37,11 +38,11 @@ print(value if isinstance(value, str) else json.dumps(value))
 PY
 }
 
-# The single *.envelope.json in a state dir (fails if there is not exactly one).
+# The single *.envelope.json under a state root (state is per-role, so the
+# envelopes live one level down). Fails if there is not exactly one.
 sole_envelope() {
-    local state="$1" found=""
-    local f
-    for f in "$state"/*.envelope.json; do
+    local root="$1" found="" f
+    for f in "$root"/*/*.envelope.json; do
         [ -f "$f" ] || continue
         [ -z "$found" ] || return 1
         found="$f"
@@ -77,6 +78,8 @@ for arg in "$@"; do
     prev="$arg"
 done
 
+complete_report='{"status":"complete","summary":"stub done","findings":[]}'
+
 printf '{"type":"thread.started","thread_id":"%s"}\n' "${STUB_SESSION_ID:-stub-session-0001}"
 
 case "${STUB_MODE:-complete}" in
@@ -84,20 +87,43 @@ case "${STUB_MODE:-complete}" in
         sleep "${STUB_HANG_SECONDS:-10}"
         exit 0
         ;;
+    slow)
+        sleep "${STUB_SLOW_SECONDS:-3}"
+        printf '%s\n' "$complete_report" > "$out"
+        ;;
     no-envelope)
         exit 0
+        ;;
+    complete-nested-session)
+        # A resume that mints a NEW session id, reported deeper in the event
+        # shape than the opening line: inside an array, inside an object.
+        printf '{"type":"thread.resumed","payload":{"sessions":[{"session_id":"%s"}]}}\n' \
+            "${STUB_RESUMED_SESSION_ID:?}"
+        printf '%s\n' "$complete_report" > "$out"
+        ;;
+    complete-nonzero)
+        # The dangerous shape: a model claiming success while codex itself
+        # fails (quota, sandbox denial, crash after the last message).
+        printf '%s\n' "$complete_report" > "$out"
+        printf 'codex: stream disconnected before completion\n' >&2
+        exit "${STUB_EXIT_CODE:-4}"
         ;;
     partial)
         printf '%s\n' '{"status":"partial","summary":"stub ran out of room","findings":[{"severity":"high","summary":"stub finding","detail":"stub detail","location":"stub.py:1"}]}' > "$out"
         ;;
     *)
-        printf '%s\n' '{"status":"complete","summary":"stub done","findings":[]}' > "$out"
+        printf '%s\n' "$complete_report" > "$out"
         ;;
 esac
 exit 0
 STUB
 chmod +x "$BIN/codex"
 export PATH="$BIN:$PATH"
+[ "$(command -v codex)" = "$BIN/codex" ] || {
+    printf 'stub codex is not first on PATH (%s) — refusing to run against the real binary\n' \
+        "$(command -v codex || true)" >&2
+    exit 1
+}
 
 # ---------------------------------------------------------------------------
 # (a) the prompt travels by file, never as an argument
@@ -137,10 +163,10 @@ case_a() {
 }
 
 # ---------------------------------------------------------------------------
-# (b) codex runs in --repo no matter where the caller stood
+# (b) codex is anchored to --repo no matter where the caller stood
 # ---------------------------------------------------------------------------
 case_b() {
-    local name="b  codex runs in --repo regardless of caller cwd"
+    local name="b  codex anchored to --repo (cd + -C) regardless of caller cwd"
     local log="$TMP/log/b" state="$TMP/state/b" prompt="$TMP/prompt-b.md"
     printf 'Review the plan.\n' > "$prompt"
     local expected
@@ -160,6 +186,12 @@ case_b() {
     actual="$(cat "$log/cwd" 2>/dev/null || true)"
     if [ "$actual" != "$expected" ]; then
         fail "$name" "codex ran in '$actual', expected '$expected'"
+        return
+    fi
+    # The cd is what the cwd check proves; -C is the second anchor, asserted
+    # separately so removing it cannot pass unnoticed.
+    if ! grep -qx -- '-C' "$log/argv" || ! grep -qx "$expected" "$log/argv"; then
+        fail "$name" "codex was not given -C $expected"
         return
     fi
     pass "$name"
@@ -219,7 +251,7 @@ case_d() {
     local i started=""
     for i in $(seq 1 100); do
         local f
-        for f in "$state"/*.events.ndjson; do
+        for f in "$state"/*/*.events.ndjson; do
             [ -f "$f" ] || continue
             if grep -q 'thread.started' "$f" 2>/dev/null; then started="$f"; break; fi
         done
@@ -249,17 +281,30 @@ case_d() {
         fail "$name" "envelope status after kill is '$status', expected 'interrupted'"
         return
     fi
-    local id
+    local id role_dir
     id="$(json_get "$env" invocation_id)"
-    if [ ! -f "$state/$id.session" ] || ! grep -q "$session" "$state/$id.session"; then
-        fail "$name" "session id was not checkpointed to $state/$id.session"
+    role_dir="$(dirname "$env")"
+    if [ ! -f "$role_dir/$id.session" ] || ! grep -q "$session" "$role_dir/$id.session"; then
+        fail "$name" "session id was not checkpointed to $role_dir/$id.session"
         return
     fi
 
+    # Resume by running the exact command the interrupted run printed — the
+    # spec asks for a one-command resume, so the printed line must be runnable.
+    local resume_cmd
+    resume_cmd="$(sed -n '/^resume with:/{n;s/^ *//;p;}' "$TMP/d1.err")"
+    if [ -z "$resume_cmd" ]; then
+        fail "$name" "interrupted run printed no resume command: $(tr '\n' ' ' < "$TMP/d1.err")"
+        return
+    fi
+    case "$resume_cmd" in
+        *'<'*'>'*) fail "$name" "resume command is a placeholder, not runnable: $resume_cmd"; return ;;
+    esac
+
     rc=0
-    STUB_LOG_DIR="$log_resume" CLODEX_RUNNER_STATE_DIR="$state" STUB_MODE=complete \
-        "$RUNNER" --resume "$id" --prompt-file "$prompt" \
-        > "$TMP/d2.out" 2> "$TMP/d2.err" || rc=$?
+    STUB_LOG_DIR="$log_resume" CLODEX_RUNNER_STATE_DIR="$state" \
+    STUB_MODE=complete-nested-session STUB_RESUMED_SESSION_ID="$session-second" \
+        eval "$resume_cmd" > "$TMP/d2.out" 2> "$TMP/d2.err" || rc=$?
 
     if [ "$rc" -ne 0 ]; then
         fail "$name" "resume exited $rc; stderr: $(tail -3 "$TMP/d2.err" | tr '\n' ' ')"
@@ -285,6 +330,17 @@ case_d() {
     fi
     if [ "$(json_get "$env2" codex.resumed)" != "true" ]; then
         fail "$name" "resumed envelope does not record codex.resumed = true"
+        return
+    fi
+    # The resume minted a new session id, nested inside an array. A further
+    # resume must continue from THAT one, so it has to be what got checkpointed
+    # and what the envelope reports.
+    if ! grep -qx "$session-second" "$role_dir/$id.session"; then
+        fail "$name" "checkpoint still holds '$(cat "$role_dir/$id.session")', expected $session-second"
+        return
+    fi
+    if [ "$(json_get "$env2" codex.session_id)" != "$session-second" ]; then
+        fail "$name" "envelope reports a stale session id: $(json_get "$env2" codex.session_id)"
         return
     fi
     pass "$name"
@@ -322,11 +378,199 @@ case_e() {
     pass "$name"
 }
 
+# ---------------------------------------------------------------------------
+# (f) the model claims success but codex failed => the process wins
+# ---------------------------------------------------------------------------
+case_f() {
+    local name="f  model says complete but codex exits non-zero => failed, exit non-zero"
+    local log="$TMP/log/f" state="$TMP/state/f" prompt="$TMP/prompt-f.md"
+    printf 'Review the plan.\n' > "$prompt"
+
+    local rc=0
+    STUB_LOG_DIR="$log" CLODEX_RUNNER_STATE_DIR="$state" \
+    STUB_MODE=complete-nonzero STUB_EXIT_CODE=4 \
+        "$RUNNER" --role code-reviewer --repo "$REPO" --prompt-file "$prompt" \
+        > "$TMP/f.out" 2> "$TMP/f.err" || rc=$?
+
+    if [ "$rc" -eq 0 ]; then
+        fail "$name" "runner exited 0 although codex exited 4"
+        return
+    fi
+    local env
+    env="$(sole_envelope "$state")" || { fail "$name" "no single envelope in $state"; return; }
+    local status
+    status="$(json_get "$env" status)"
+    if [ "$status" != "failed" ]; then
+        fail "$name" "envelope status is '$status', expected 'failed'"
+        return
+    fi
+    # The model's own claim is preserved for auditing, but it did not decide.
+    if [ "$(json_get "$env" model_status)" != "complete" ]; then
+        fail "$name" "the model's own claim was not preserved in model_status"
+        return
+    fi
+    if [ "$(json_get "$env" exit.code)" != "4" ]; then
+        fail "$name" "envelope did not record codex's exit code"
+        return
+    fi
+    pass "$name"
+}
+
+# ---------------------------------------------------------------------------
+# (g) a long run heartbeats to stderr, and the ticker dies with the run
+# ---------------------------------------------------------------------------
+case_g() {
+    local name="g  long run heartbeats to stderr and leaves no ticker behind"
+    local log="$TMP/log/g" state="$TMP/state/g" prompt="$TMP/prompt-g.md"
+    printf 'Review the plan.\n' > "$prompt"
+
+    local rc=0
+    STUB_LOG_DIR="$log" CLODEX_RUNNER_STATE_DIR="$state" \
+    STUB_MODE=slow STUB_SLOW_SECONDS=3 CLODEX_HEARTBEAT_SECONDS=1 \
+        "$RUNNER" --role advisor --repo "$REPO" --prompt-file "$prompt" \
+        > "$TMP/g.out" 2> "$TMP/g.err" || rc=$?
+
+    if [ "$rc" -ne 0 ]; then
+        fail "$name" "runner exited $rc; stderr: $(tail -3 "$TMP/g.err" | tr '\n' ' ')"
+        return
+    fi
+    local ticks
+    ticks="$(grep -c 'still running' "$TMP/g.err" || true)"
+    if [ "$ticks" -lt 2 ]; then
+        fail "$name" "expected repeated heartbeats on stderr, saw $ticks"
+        return
+    fi
+    if ! grep -q 'last event:' "$TMP/g.err"; then
+        fail "$name" "heartbeat does not report the last observed event"
+        return
+    fi
+    if [ "$(wc -l < "$TMP/g.out" | tr -d ' ')" != "1" ]; then
+        fail "$name" "heartbeat polluted stdout: $(tr '\n' ' ' < "$TMP/g.out")"
+        return
+    fi
+    # A ticker that outlived the run would keep writing after the runner exited.
+    local before after
+    before="$(wc -l < "$TMP/g.err" | tr -d ' ')"
+    sleep 2
+    after="$(wc -l < "$TMP/g.err" | tr -d ' ')"
+    if [ "$before" != "$after" ]; then
+        fail "$name" "the heartbeat ticker outlived the run ($before -> $after lines)"
+        return
+    fi
+    pass "$name"
+}
+
+# ---------------------------------------------------------------------------
+# (h) state belongs to the repo being worked on, not to this catalogue
+# ---------------------------------------------------------------------------
+case_h() {
+    local name="h  default state dir is <repo>/.clodex/runner/<role>"
+    local log="$TMP/log/h" prompt="$TMP/prompt-h.md" repo="$TMP/repo-h"
+    mkdir -p "$repo"
+    printf 'Review the plan.\n' > "$prompt"
+
+    local rc=0
+    env -u CLODEX_RUNNER_STATE_DIR STUB_LOG_DIR="$log" STUB_MODE=complete \
+        "$RUNNER" --role plan-reviewer --repo "$repo" --prompt-file "$prompt" \
+        > "$TMP/h.out" 2> "$TMP/h.err" || rc=$?
+
+    if [ "$rc" -ne 0 ]; then
+        fail "$name" "runner exited $rc; stderr: $(tail -3 "$TMP/h.err" | tr '\n' ' ')"
+        return
+    fi
+    local env
+    env="$(sole_envelope "$repo/.clodex/runner")" || {
+        fail "$name" "no envelope under $repo/.clodex/runner"; return; }
+    if [ "$(dirname "$env")" != "$repo/.clodex/runner/plan-reviewer" ]; then
+        fail "$name" "envelope landed in $(dirname "$env"), expected the plan-reviewer dir"
+        return
+    fi
+    if [ -e "$RUNNER_DIR/state" ]; then
+        fail "$name" "the runner wrote state into the catalogue repo: $RUNNER_DIR/state"
+        return
+    fi
+    pass "$name"
+}
+
+# ---------------------------------------------------------------------------
+# (i) a flag with no value is a usage error, not a silent failure
+# ---------------------------------------------------------------------------
+case_i() {
+    local name="i  trailing flag with no value => exit 64 with a message"
+    local prompt="$TMP/prompt-i.md" flag rc broken=""
+    printf 'Review the plan.\n' > "$prompt"
+
+    for flag in --prompt-file --role --input --repo --resume; do
+        rc=0
+        STUB_LOG_DIR="$TMP/log/i" CLODEX_RUNNER_STATE_DIR="$TMP/state/i" STUB_MODE=complete \
+            "$RUNNER" --role advisor --repo "$REPO" --prompt-file "$prompt" "$flag" \
+            > /dev/null 2> "$TMP/i.err" || rc=$?
+        if [ "$rc" -ne 64 ]; then
+            broken="$flag exited $rc, expected 64"
+            break
+        fi
+        if [ ! -s "$TMP/i.err" ]; then
+            broken="$flag failed silently — nothing on stderr"
+            break
+        fi
+    done
+    if [ -n "$broken" ]; then
+        fail "$name" "$broken"
+        return
+    fi
+    pass "$name"
+}
+
+# ---------------------------------------------------------------------------
+# (j) a resume that produces nothing must not inherit the last turn's report
+# ---------------------------------------------------------------------------
+case_j() {
+    local name="j  resume with no new report => failed, never the previous turn's"
+    local state="$TMP/state/j" prompt="$TMP/prompt-j.md"
+    local log_one="$TMP/log/j-1" log_two="$TMP/log/j-2"
+    printf 'Review the plan.\n' > "$prompt"
+
+    local rc=0
+    STUB_LOG_DIR="$log_one" CLODEX_RUNNER_STATE_DIR="$state" STUB_MODE=complete \
+        "$RUNNER" --role plan-reviewer --repo "$REPO" --prompt-file "$prompt" \
+        > "$TMP/j1.out" 2> "$TMP/j1.err" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail "$name" "first turn exited $rc; stderr: $(tail -3 "$TMP/j1.err" | tr '\n' ' ')"
+        return
+    fi
+    local env id
+    env="$(sole_envelope "$state")" || { fail "$name" "no envelope from the first turn"; return; }
+    id="$(json_get "$env" invocation_id)"
+
+    rc=0
+    STUB_LOG_DIR="$log_two" CLODEX_RUNNER_STATE_DIR="$state" STUB_MODE=no-envelope \
+        "$RUNNER" --role plan-reviewer --repo "$REPO" --resume "$id" --prompt-file "$prompt" \
+        > "$TMP/j2.out" 2> "$TMP/j2.err" || rc=$?
+
+    if [ "$rc" -eq 0 ]; then
+        fail "$name" "resume exited 0 while writing no report of its own"
+        return
+    fi
+    env="$(sole_envelope "$state")" || { fail "$name" "no envelope after the resume"; return; }
+    local status
+    status="$(json_get "$env" status)"
+    if [ "$status" != "failed" ]; then
+        fail "$name" "resume envelope is '$status' — it inherited the first turn's report"
+        return
+    fi
+    pass "$name"
+}
+
 case_a
 case_b
 case_c
 case_d
 case_e
+case_f
+case_g
+case_h
+case_i
+case_j
 
 printf '\n'
 if [ "$FAILURES" -ne 0 ]; then
