@@ -133,6 +133,7 @@ for d in v["debt"]:     print("debt    ", d.get("class"), "|", d.get("reason"))'
 | some classes covered, some not | mid-stage | §4, then §5 for **only the uncovered classes** |
 | a finding with `disposition: "open"` | a finding you have not answered | §8 |
 | every declared class covered | done | §10 |
+| `$PLAN` is empty — the manifest's `plan.path` is null | the run is malformed: build cannot have run without a recorded plan, and nothing here can be checked against a plan that is not there | Stop, as in the first row: hand back to `clodex` and ask it to close or abandon the run, naming the null `plan.path`. §7 sends you here too. |
 
 **The reducer does not de-duplicate.** A session that died mid-stage and resumed
 will append the same evidence twice unless you read the lists above first and
@@ -391,7 +392,9 @@ START="$(python3 "$STATE" rebuild "$RUN_DIR" | python3 -c 'import json,sys;print
 git diff "$START" HEAD > "$RUN_DIR/verify.diff"
 PROMPT="$RUN_DIR/tests-review.prompt.md"      # written with your file tool, never a shell string
 if [ -z "$PLAN" ]; then
-    echo "this run has no plan path — there is nothing to review against; stop and hand back (§1)"
+    echo "STOP: this run's plan.path is null, so there is nothing to review against."
+    echo "Do not run the worker and do not continue this section — hand back to clodex"
+    echo "and ask it to close or abandon the run (§1, last row of the resume map)."
 else
     OUT="$(bash "$RUNNER" --role code-reviewer --repo "$REPO" \
             --prompt-file "$PROMPT" --input "$RUN_DIR/verify.diff" --input "$PLAN")"; RC=$?
@@ -400,12 +403,18 @@ else
 fi
 ```
 
-**The `$PLAN` guard is not decoration.** §0 defines it as `plan.path or ""`, and
-an empty one makes the runner die with exit **64** and `input artifact not found:`
+**The `$PLAN` guard is a hard stop, not a fallback.** When it fires, leave §7
+entirely: `$ENVELOPE` is never set, so the envelope check below would read a
+stale path from an earlier invocation or nothing at all, and either way report on
+a review that did not happen.
+
+It is not decoration either. §0 defines `$PLAN` as `plan.path or ""`, and an
+empty one makes the runner die with exit **64** and `input artifact not found:`
 before codex ever starts — a usage error you would then debug as if the worker
-had failed. A run at `verify` whose `plan.path` is null is a broken run anyway:
-the whole assignment is "does this prove what the plan says", so there is nothing
-to ask.
+had failed. A run at `verify` whose `plan.path` is null is malformed regardless:
+build cannot have run without a recorded plan, and this stage's whole question is
+"does this prove what the plan says". §1's resume map sends that run the same way
+this branch does.
 
 **The role is `code-reviewer`, always.** The runner puts it in codex's
 `read-only` sandbox, so it cannot edit your tree even if the prompt slipped.
@@ -661,11 +670,14 @@ def under(path, prefix):                  # path IS prefix, or sits inside it
 
 acknowledged = snap["git"]["dirty_at_start"]
 raw = subprocess.check_output(
-    ["git", "status", "--porcelain", "--untracked-files=no"]).decode().rstrip("\n")
-theirs, since = [], []
-for line in (raw.split("\n") if raw else []):
-    entry = line[3:]
-    paths = entry.split(" -> ") if " -> " in entry else [entry]   # a rename: both sides
+    ["git", "status", "--porcelain", "-z", "--untracked-files=no"]).decode()
+fields, i, theirs, since = raw.split("\0"), 0, [], []
+while i < len(fields) and fields[i]:
+    entry = fields[i]; i += 1
+    paths = [entry[3:]]
+    if entry[0] in ("R", "C"):
+        paths.append(fields[i]); i += 1        # a rename's origin path counts too
+    line = "%s %s" % (entry[:2], " <- ".join(paths))
     bucket = theirs if all(any(under(p, d) for d in acknowledged) for p in paths) else since
     bucket.append(line)
 print("tracked, dirty before the run opened:", " | ".join(theirs) or "(none)",
@@ -682,23 +694,42 @@ PY
 **Debt never appears in `blockers`.** A run with four debt entries prints
 `VERIFY COMPLETE`. That is the design, not an oversight: this stage has no gate.
 
-Three lines it prints are yours to interpret, not the script's. Every one of them
-that fires goes into the handoff as §11's item 5:
+**`-z` is load-bearing in that last read.** Plain `git status --porcelain`
+C-quotes any path with a space or a non-ASCII character — `a b.txt` comes back as
+`"a b.txt"` — so it never matches its `dirty_at_start` entry, lands in `modified
+since`, and the next bullet tells you it is a finding. That is the round-1 bug
+again, narrowed to paths with spaces or accents. `-z` emits raw paths, NUL
+separated, and never quotes; it also puts a rename's origin in its own field
+instead of an unquoted-but-ambiguous ` -> `. Both siblings do the same thing —
+`clodex-build` §3/§7 parse `-z` for exactly this reason.
+
+Three lines it prints are yours to interpret, not the script's. **The first two**
+go into the handoff as §11's item 5 when they fire; the third never does:
 
 - **`SOMETHING COMMITTED DURING VERIFY`** — verify makes no commits, so it is one
   of three: the user committed a fix (§8, row B), the user committed unrelated
   work of their own mid-session, or this stage broke its own rule (§2). Name
   which, with the sha — `git log --oneline <expected>..HEAD` shows what landed.
-  The first two are facts ship needs; the third is a defect ship needs.
+  Either kind of user commit is a fact ship needs; a commit this stage made is a
+  defect ship needs.
 - **`tracked, modified since`** — a suite that rewrites snapshots, a formatter
   that ran as a side effect. You do not commit it and you do not revert it: it is
   a finding (§8), and it means the gate mutates the tree, which ship's commit
   step would otherwise sweep up.
 - **`tracked, dirty before the run opened`** — the user's own uncommitted work,
   acknowledged at run open and subtracted here on purpose. **It is not a
-  finding**, it is not yours to stage, revert, or clean, and recording one would
-  put someone else's work in front of ship's final review forever. Repos where a
-  clodex run coexists with unrelated edits are the normal case, not the odd one.
+  finding**, it is not yours to stage, revert, or clean, it is never repeated in
+  the handoff, and recording one would put someone else's work in front of ship's
+  final review forever. Repos where a clodex run coexists with unrelated edits are
+  the normal case, not the odd one.
+
+**What the subtraction cannot tell you.** `git status` prints one line per path
+and no provenance, so a path that is *both* acknowledged and touched by this run
+reads as acknowledged, and the run's own edit hides inside the user's. Nothing
+here can separate them. What actually keeps a run off acknowledged paths is the
+router's fold / isolate / abort resolution at `clodex` §5B, settled with the user
+before build opened its first batch — this line is a blind spot downstream of
+that decision, not a second line of defence for it.
 
 ---
 
