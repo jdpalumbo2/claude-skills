@@ -154,7 +154,7 @@
           "scope": {"type": "string"},
           "by": {"type": "string"},
           "plan_version": {"type": ["integer", "null"]},
-          "plan_hash": {"type": "string", "description": "A plan hash this run has recorded. Never null — an approval bound to nothing could never be revoked by an amendment."},
+          "plan_hash": {"type": "string", "description": "The plan hash that was current when this approval was granted; approving a superseded hash is refused. Never null — an approval bound to nothing could never be revoked by an amendment. Consequence a consumer can rely on: an approval with revoked == null is bound to the run's current plan.hash."},
           "actions": {
             "type": "array",
             "description": "The exact external actions authorized.",

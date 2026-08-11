@@ -418,12 +418,59 @@ class ReducerTests(StateTestCase):
             {"e": "release:updated", "state": "banana"},
         )
 
-    def test_approval_must_reference_an_existing_plan_hash(self):
+    def test_approval_must_reference_the_current_plan_hash(self):
         self.assert_last_event_refused(
             {"e": "run:opened"},
             {"e": "plan:recorded", "version": 1, "path": "docs/plans/x.md", "hash": "h1"},
             {"e": "plan:approved", "plan_hash": "not-a-real-hash"},
         )
+
+    def test_approval_against_a_superseded_hash_is_refused(self):
+        # h1 is a hash the log has seen, so an "does this exist anywhere"
+        # check passes it. But the amendment's revocation sweep has already
+        # run, so this approval would keep revoked == null forever: a
+        # live-looking approval bound to a plan that no longer applies.
+        self.assert_last_event_refused(
+            {"e": "run:opened"},
+            {"e": "plan:recorded", "version": 1, "path": "docs/plans/x.md", "hash": "h1"},
+            {"e": "plan:approved"},
+            {"e": "plan:amended", "version": 2, "hash": "h2", "note": "scope change"},
+            {"e": "approval:granted", "scope": "release-authorization", "plan_hash": "h1"},
+        )
+
+        # The approval granted *before* the amendment is untouched by this
+        # rule: it stays, marked revoked by the sweep.
+        approvals = rebuild(self.run_dir)["approvals"]
+        self.assertEqual(len(approvals), 1)
+        self.assertEqual(approvals[0]["revoked"]["superseding_hash"], "h2")
+
+        # An approval against the new hash is still legal.
+        append_event(self.run_dir, {"e": "approval:granted", "scope": "release-authorization"})
+        live = [a for a in rebuild(self.run_dir)["approvals"] if a["revoked"] is None]
+        self.assertEqual([a["plan_hash"] for a in live], ["h2"])
+
+    def test_live_approvals_are_always_bound_to_the_current_plan_hash(self):
+        # The guarantee consumers get from the two rules together: approvals may
+        # only bind to the current hash, and an amendment sweeps everything bound
+        # to the hash it supersedes. So `revoked is None` alone is enough to know
+        # an approval still applies — no hash comparison needed downstream.
+        self.append_all(
+            {"e": "run:opened"},
+            {"e": "plan:recorded", "version": 1, "path": "docs/plans/x.md", "hash": "h1"},
+            {"e": "plan:approved"},
+            {"e": "plan:amended", "version": 2, "hash": "h2"},
+            {"e": "approval:granted", "scope": "release-authorization"},
+            {"e": "plan:amended", "version": 3, "hash": "h3"},
+            {"e": "plan:approved"},
+        )
+        snap = rebuild(self.run_dir)
+        self.assertEqual(snap["plan"]["hash"], "h3")
+        self.assertEqual(len(snap["approvals"]), 3)
+        for approval in snap["approvals"]:
+            if approval["revoked"] is None:
+                self.assertEqual(approval["plan_hash"], snap["plan"]["hash"])
+        self.assertEqual([a["plan_hash"] for a in snap["approvals"] if a["revoked"] is None],
+                         ["h3"])
 
     def test_approval_bound_to_no_plan_is_refused(self):
         # An approval with no plan hash could never be revoked by an amendment.

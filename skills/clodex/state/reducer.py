@@ -159,18 +159,6 @@ def _find(items, key, value, event, what):
     raise _violation(event, "no such %s: %r" % (what, value))
 
 
-def _known_plan_hashes(snap):
-    plan = snap["plan"]
-    hashes = set()
-    if plan["hash"]:
-        hashes.add(plan["hash"])
-    for amendment in plan["amendments"]:
-        for key in ("from_hash", "to_hash"):
-            if amendment.get(key):
-                hashes.add(amendment[key])
-    return hashes
-
-
 # --------------------------------------------------------------------------- #
 # handlers
 # --------------------------------------------------------------------------- #
@@ -244,15 +232,24 @@ def _on_plan_amended(snap, event):
 
 def _on_approval(snap, event):
     plan = snap["plan"]
-    plan_hash = event.get("plan_hash", plan["hash"])
+    current = plan["hash"]
+    plan_hash = event.get("plan_hash", current)
     # An approval bound to nothing could never be revoked by an amendment.
     if not plan_hash:
         raise _violation(
             event,
             "approval must bind to a plan hash; none given and no plan is recorded",
         )
-    if plan_hash not in _known_plan_hashes(snap):
-        raise _violation(event, "approval references unknown plan hash %r" % (plan_hash,))
+    # And it must be the *current* hash, not merely one the log has seen. An
+    # amendment's revocation sweep runs once, when that amendment is reduced,
+    # so an approval arriving afterwards against a superseded hash would never
+    # be swept — it would sit there looking live forever.
+    if plan_hash != current:
+        raise _violation(
+            event,
+            "approval binds to plan hash %r but the current plan hash is %r"
+            % (plan_hash, current),
+        )
     snap["approvals"].append({
         "t": event.get("t"),
         "scope": event.get("scope", "plan"),
