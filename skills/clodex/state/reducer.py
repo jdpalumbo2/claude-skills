@@ -209,6 +209,13 @@ def _on_plan_amended(snap, event):
     superseded = plan["hash"]
     if superseded is None:
         raise _violation(event, "amendment before any plan was recorded")
+    # An amendment exists to supersede a hash. Without a real new one it would
+    # revoke every approval and bind the plan to nothing in exchange.
+    new_hash = event.get("hash")
+    if not isinstance(new_hash, str) or not new_hash:
+        raise _violation(event, "plan:amended must carry the new plan hash")
+    if new_hash == superseded:
+        raise _violation(event, "plan:amended does not supersede anything: the hash is unchanged")
     plan["amendments"].append({
         "seq": event.get("seq"),
         "t": event.get("t"),

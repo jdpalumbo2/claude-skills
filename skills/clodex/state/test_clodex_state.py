@@ -21,7 +21,6 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import clodex_state  # noqa: E402
-import reducer  # noqa: E402
 from clodex_state import (  # noqa: E402
     ClodexStateError,
     ReducerInvariantError,
@@ -34,6 +33,10 @@ from clodex_state import (  # noqa: E402
     rebuild,
 )
 
+# The one reducer instance clodex_state itself loaded, so the exception classes
+# a test asserts on are the classes the code raises.
+reducer = clodex_state.reducer
+
 MODULE = str(HERE / "clodex_state.py")
 TORN_LINE = '{"schema_version":1,"seq":2,"e":"stage'
 
@@ -45,8 +48,7 @@ HOLD_LOCK_SCRIPT = (
     "    sys.stdin.readline()\n"
 ) % str(HERE)
 
-# Each process hammers the same log. append_event holds the run lock, so a
-# loser must wait rather than be handed a seq someone else is already using.
+# Independent processes racing for the same log with no session lock held.
 CONCURRENT_APPEND_SCRIPT = (
     "import sys, time\n"
     "sys.path.insert(0, %r)\n"
@@ -65,6 +67,31 @@ CONCURRENT_APPEND_SCRIPT = (
     "        raise SystemExit('gave up waiting for the lock: ' + label)\n"
 ) % str(HERE)
 
+# Delegates of one session lock: they carry the token, so they never contend for
+# the session lock at all. Only the write lock keeps them from colliding.
+DELEGATE_APPEND_SCRIPT = (
+    "import os, sys, time\n"
+    "sys.path.insert(0, %r)\n"
+    "import clodex_state\n"
+    "run_dir, go, label, count = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])\n"
+    "assert os.environ.get(clodex_state.LOCK_TOKEN_ENV), 'no delegated token inherited'\n"
+    "print('ready', flush=True)\n"
+    "while not os.path.exists(go):\n"
+    "    time.sleep(0.002)\n"
+    "for index in range(count):\n"
+    "    clodex_state.append_event(run_dir, {'e': 'finding:recorded',\n"
+    "                                        'id': '%%s-%%d' %% (label, index),\n"
+    "                                        'source': 'delegate'})\n"
+) % str(HERE)
+
+IMPORT_BY_PATH_SCRIPT = (
+    "import importlib.util\n"
+    "spec = importlib.util.spec_from_file_location('cs', %r)\n"
+    "module = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(module)\n"
+    "print(module.SCHEMA_VERSION)\n"
+) % MODULE
+
 
 class StateTestCase(unittest.TestCase):
     """Gives every test a real, empty run directory on disk."""
@@ -72,7 +99,8 @@ class StateTestCase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.run_dir = Path(tmp.name) / "r-2026-08-10-a"
+        self.tmp_root = Path(tmp.name)
+        self.run_dir = self.tmp_root / "r-2026-08-10-a"
         self.run_dir.mkdir()
         self.events = self.run_dir / "events.ndjson"
         self.snapshot = self.run_dir / "run.json"
@@ -191,7 +219,7 @@ class EventLogTests(StateTestCase):
     def test_event_without_a_type_is_rejected_before_any_write(self):
         with self.assertRaises(ClodexStateError):
             append_event(self.run_dir, {"note": "no e field"})
-        self.assertFalse(self.events.exists())
+        self.assertEqual(list(self.run_dir.iterdir()), [])  # not even a lockfile
 
     def test_unknown_event_type_is_rejected(self):
         with self.assertRaises(ClodexStateError):
@@ -202,12 +230,39 @@ class EventLogTests(StateTestCase):
         schema = json.loads((HERE / "schemas" / "event.schema.json").read_text())
         self.assertEqual(sorted(reducer.HANDLERS), sorted(schema["properties"]["e"]["enum"]))
 
+    def test_module_can_be_imported_by_path(self):
+        # A directory with no reducer.py in it and nothing putting the state
+        # directory on sys.path: a bare `import reducer` cannot resolve here.
+        workdir = tempfile.TemporaryDirectory()
+        self.addCleanup(workdir.cleanup)
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+
+        bare = subprocess.run(
+            [sys.executable, "-c", "import reducer"], cwd=workdir.name, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.assertNotEqual(bare.returncode, 0)  # the environment really is hostile
+
+        loaded = subprocess.run(
+            [sys.executable, "-c", IMPORT_BY_PATH_SCRIPT], cwd=workdir.name, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.assertEqual(loaded.returncode, 0, loaded.stderr)
+        self.assertEqual(loaded.stdout.strip(), str(clodex_state.SCHEMA_VERSION))
+
 
 class ConcurrencyTests(StateTestCase):
+    def assert_log_is_a_clean_run_of(self, total):
+        seqs = [record["seq"] for record in self.event_lines()]
+        self.assertEqual(seqs, list(range(1, total + 1)))  # unique and contiguous
+        snap = rebuild(self.run_dir)  # would raise if any seq had been reused
+        self.assertEqual(snap["last_seq"], total)
+        self.assertEqual(len(snap["findings"]), total)
+
     def test_concurrent_appends_never_reuse_a_seq(self):
         writers, per_writer = 4, 5
         env = dict(os.environ)
-        env.pop(clodex_state.LOCK_TOKEN_ENV, None)  # no delegated lock: real contention
+        env.pop(clodex_state.LOCK_TOKEN_ENV, None)  # no delegated token: separate sessions
 
         processes = [
             subprocess.Popen(
@@ -226,20 +281,61 @@ class ConcurrencyTests(StateTestCase):
                 if process.poll() is None:
                     process.kill()
 
-        total = writers * per_writer
-        seqs = [record["seq"] for record in self.event_lines()]
-        self.assertEqual(seqs, list(range(1, total + 1)))  # unique and contiguous
-
-        snap = rebuild(self.run_dir)  # would raise if any seq had been reused
-        self.assertEqual(snap["last_seq"], total)
-        self.assertEqual(len(snap["findings"]), total)
+        self.assert_log_is_a_clean_run_of(writers * per_writer)
         self.assertFalse(self.lock.exists())
+
+    def test_concurrent_delegates_of_one_session_never_reuse_a_seq(self):
+        # The documented pattern: one session lock, several CLI-style children
+        # carrying its token, running at the same time. They never contend for
+        # the session lock, so only the write lock can serialize them.
+        writers, per_writer = 4, 5
+        go = self.tmp_root / "go"
+
+        with acquire_lock(self.run_dir):
+            processes = [
+                subprocess.Popen(
+                    [sys.executable, "-c", DELEGATE_APPEND_SCRIPT,
+                     str(self.run_dir), str(go), "d%d" % index, str(per_writer)],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                for index in range(writers)
+            ]
+            try:
+                for process in processes:  # everyone at the barrier before anyone starts
+                    ready = process.stdout.readline().strip()
+                    if ready != "ready":
+                        raise AssertionError("delegate failed to start: %s" % process.stderr.read())
+                go.write_text("go")
+                for process in processes:
+                    out, err = process.communicate(timeout=120)
+                    self.assertEqual(process.returncode, 0, err or out)
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+
+            self.assertTrue(self.lock.exists())  # the session lock was ours throughout
+
+        self.assert_log_is_a_clean_run_of(writers * per_writer)
 
 
 class ReducerTests(StateTestCase):
     def append_all(self, *events):
         for event in events:
             append_event(self.run_dir, event)
+
+    def assert_last_event_refused(self, *events):
+        """Every event but the last is legal; the last must never reach the log."""
+        for event in events[:-1]:
+            append_event(self.run_dir, event)
+        before = self.events.read_text() if self.events.exists() else ""
+
+        with self.assertRaises(ReducerInvariantError):
+            append_event(self.run_dir, events[-1])
+
+        after = self.events.read_text() if self.events.exists() else ""
+        self.assertEqual(after, before)  # append-only log untouched
+        rebuild(self.run_dir)  # and the run is still readable
 
     def test_reducer_deterministic(self):
         # plan:recorded precedes the approval because an approval must bind to a
@@ -268,14 +364,12 @@ class ReducerTests(StateTestCase):
         self.assertEqual(snap["git"], {"start_head": "abc123", "dirty_at_start": ["notes.md"]})
         self.assertEqual(snap["last_seq"], 1)
 
-    def test_stage_monotonicity_violation_raises(self):
-        self.append_all(
+    def test_stage_monotonicity_violation_refused(self):
+        self.assert_last_event_refused(
             {"e": "run:opened"},
             {"e": "stage:build:entered"},
             {"e": "stage:plan:entered"},
         )
-        with self.assertRaises(ReducerInvariantError):
-            rebuild(self.run_dir)
 
     def test_re_entering_the_same_stage_is_allowed(self):
         self.append_all(
@@ -286,13 +380,11 @@ class ReducerTests(StateTestCase):
         self.assertEqual(rebuild(self.run_dir)["stage"], "build")
 
     def test_only_one_open_release_step_at_a_time(self):
-        self.append_all(
+        self.assert_last_event_refused(
             {"e": "run:opened"},
             {"e": "release:step:pending", "step": "push", "op_id": "op-1"},
             {"e": "release:step:pending", "step": "tag", "op_id": "op-2"},
         )
-        with self.assertRaises(ReducerInvariantError):
-            rebuild(self.run_dir)
 
     def test_release_step_closes_then_a_new_one_opens(self):
         self.append_all(
@@ -314,36 +406,28 @@ class ReducerTests(StateTestCase):
             ],
         )
 
-    def test_closing_an_unknown_release_step_raises(self):
-        self.append_all(
+    def test_closing_an_unknown_release_step_refused(self):
+        self.assert_last_event_refused(
             {"e": "run:opened"},
             {"e": "release:step:done", "op_id": "never-opened"},
         )
-        with self.assertRaises(ReducerInvariantError):
-            rebuild(self.run_dir)
 
-    def test_release_state_outside_the_schema_is_rejected(self):
-        self.append_all(
+    def test_release_state_outside_the_schema_is_refused(self):
+        self.assert_last_event_refused(
             {"e": "run:opened"},
             {"e": "release:updated", "state": "banana"},
         )
-        with self.assertRaises(ReducerInvariantError):
-            rebuild(self.run_dir)
 
     def test_approval_must_reference_an_existing_plan_hash(self):
-        self.append_all(
+        self.assert_last_event_refused(
             {"e": "run:opened"},
             {"e": "plan:recorded", "version": 1, "path": "docs/plans/x.md", "hash": "h1"},
             {"e": "plan:approved", "plan_hash": "not-a-real-hash"},
         )
-        with self.assertRaises(ReducerInvariantError):
-            rebuild(self.run_dir)
 
-    def test_approval_bound_to_no_plan_is_rejected(self):
+    def test_approval_bound_to_no_plan_is_refused(self):
         # An approval with no plan hash could never be revoked by an amendment.
-        self.append_all({"e": "run:opened"}, {"e": "plan:approved"})
-        with self.assertRaises(ReducerInvariantError):
-            rebuild(self.run_dir)
+        self.assert_last_event_refused({"e": "run:opened"}, {"e": "plan:approved"})
 
     def test_approval_binds_to_the_current_plan_hash(self):
         self.append_all(
@@ -385,6 +469,22 @@ class ReducerTests(StateTestCase):
         approvals = rebuild(self.run_dir)["approvals"]
         self.assertEqual([a["revoked"] is None for a in approvals], [False, True])
 
+    def test_amendment_without_a_new_hash_is_refused(self):
+        self.assert_last_event_refused(
+            {"e": "run:opened"},
+            {"e": "plan:recorded", "version": 1, "path": "docs/plans/x.md", "hash": "h1"},
+            {"e": "plan:amended", "version": 2, "note": "forgot the hash"},
+        )
+
+    def test_amendment_that_supersedes_nothing_is_refused(self):
+        # Same hash: it would revoke every approval and change nothing.
+        self.assert_last_event_refused(
+            {"e": "run:opened"},
+            {"e": "plan:recorded", "version": 1, "path": "docs/plans/x.md", "hash": "h1"},
+            {"e": "plan:approved"},
+            {"e": "plan:amended", "version": 2, "hash": "h1"},
+        )
+
     def test_batches_and_findings_track_by_id(self):
         self.append_all(
             {"e": "run:opened"},
@@ -408,13 +508,11 @@ class ReducerTests(StateTestCase):
         self.assertEqual(len(snap["verification"]["evidence"]), 1)
         self.assertEqual(len(snap["verification"]["debt"]), 1)
 
-    def test_committing_an_unknown_batch_raises(self):
-        self.append_all(
+    def test_committing_an_unknown_batch_refused(self):
+        self.assert_last_event_refused(
             {"e": "run:opened"},
             {"e": "batch:committed", "id": 7, "commit": "deadbee"},
         )
-        with self.assertRaises(ReducerInvariantError):
-            rebuild(self.run_dir)
 
     def test_rebuild_of_an_empty_run_dir_is_the_base_snapshot(self):
         snap = rebuild(self.run_dir)
@@ -429,6 +527,17 @@ class ReducerTests(StateTestCase):
         )
         # consumers are handed something they can trust the schema for
         reducer.validate(rebuild(self.run_dir), reducer.load_schema("snapshot.schema.json"))
+
+    def test_the_reducer_still_refuses_a_log_written_out_of_band(self):
+        # append_event vets events now, but the reducer remains the authority
+        # for a log something else wrote.
+        append_event(self.run_dir, {"e": "run:opened"})
+        with open(self.events, "a") as handle:
+            handle.write(json.dumps({
+                "schema_version": 1, "seq": 2, "t": "2026-08-10T00:00:00Z", "e": "plan:approved",
+            }) + "\n")
+        with self.assertRaises(ReducerInvariantError):
+            rebuild(self.run_dir)
 
 
 class LockTests(StateTestCase):
@@ -511,6 +620,22 @@ class LockTests(StateTestCase):
         self.assertFalse(self.events.exists())
         self.assertFalse(self.snapshot.exists())
 
+    def test_an_unidentifiable_holder_is_unknown_not_dead(self):
+        # A lockfile can be seen between its exclusive create and its payload
+        # write. That holder is very much alive, so it must not read as dead.
+        self.lock.write_text("{not json")
+
+        with self.assertRaises(RunLocked) as caught:
+            append_event(self.run_dir, {"e": "run:opened"})
+        self.assertIsNone(caught.exception.holder_alive)
+
+        with self.assertRaises(RunLocked):
+            break_lock(self.run_dir)
+        self.assertTrue(self.lock.exists())
+
+        self.assertEqual(break_lock(self.run_dir, force=True), {})
+        self.assertFalse(self.lock.exists())
+
     def test_a_dead_holders_lock_is_never_broken_implicitly(self):
         pid = self.dead_pid()
         self.write_foreign_lock(pid)
@@ -535,6 +660,7 @@ class LockTests(StateTestCase):
 
     def test_break_lock_on_an_unlocked_run_is_a_no_op(self):
         self.assertIsNone(break_lock(self.run_dir))
+        self.assertEqual(list(self.run_dir.iterdir()), [])
 
     def test_a_failed_lock_write_leaves_no_lockfile(self):
         def boom(fd, data):
@@ -571,9 +697,10 @@ class SnapshotTests(StateTestCase):
 
         self.assertEqual(load_snapshot(self.run_dir), snap)
         self.assertEqual(json.loads(self.snapshot.read_text()), snap)
-        # temp file replaced and lock released, nothing left behind
+        # temp file replaced and the session lock released; write.lock persists
+        # by design, so an flock is never held on a replaced inode.
         self.assertEqual(sorted(p.name for p in self.run_dir.iterdir()),
-                         ["events.ndjson", "run.json"])
+                         ["events.ndjson", "run.json", "write.lock"])
 
     def test_stale_snapshot_falls_back_to_rebuild(self):
         append_event(self.run_dir, {"e": "run:opened"})
@@ -668,6 +795,17 @@ class CliTests(StateTestCase):
         empty = self.cli("unlock", str(self.run_dir))
         self.assertEqual(empty.returncode, 0, empty.stderr)
         self.assertIn("no lock", empty.stdout)
+
+    def test_cli_unlock_refuses_an_unidentifiable_holder(self):
+        self.lock.write_text("{not json")
+        result = self.cli("unlock", str(self.run_dir))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("liveness unknown", result.stderr)
+        self.assertTrue(self.lock.exists())
+
+        forced = self.cli("unlock", str(self.run_dir), "--force")
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertFalse(self.lock.exists())
 
     def test_cli_unlock_refuses_a_live_holder(self):
         with subprocess.Popen(

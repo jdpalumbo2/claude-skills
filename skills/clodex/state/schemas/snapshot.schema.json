@@ -60,7 +60,7 @@
               "seq": {"type": "integer"},
               "t": {"type": ["string", "null"]},
               "from_hash": {"type": ["string", "null"]},
-              "to_hash": {"type": ["string", "null"]},
+              "to_hash": {"type": "string"},
               "version": {"type": ["integer", "null"]},
               "note": {"type": ["string", "null"]},
               "required_review": {"type": "array", "items": {"type": "string"}}
@@ -169,7 +169,7 @@
               "seq": {"type": "integer"},
               "t": {"type": ["string", "null"]},
               "superseded_hash": {"type": "string"},
-              "superseding_hash": {"type": ["string", "null"]}
+              "superseding_hash": {"type": "string"}
             }
           }
         }

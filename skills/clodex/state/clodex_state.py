@@ -1,36 +1,48 @@
 #!/usr/bin/env python3
 """clodex run state: append-only event log, deterministic reducer, lock, snapshot.
 
-A run owns a directory (in real use `.clodex/<run-id>/`) holding three files:
+A run owns a directory (in real use `.clodex/<run-id>/`):
 
     events.ndjson   append-only log, one JSON object per line — authoritative
     run.json        snapshot: the reduction over events.ndjson — derived
-    lock.json       the single-writer lockfile: PID, ISO timestamp, token
+    lock.json       session lock: who owns this run (identity, liveness)
+    write.lock      write lock: an flock serializing the writes themselves
 
 Events are the truth. The snapshot is a convenience that is rebuilt from the
 events whenever it fails to load, fails schema validation, or lags the log.
-The reduction lives in `reducer.py`, which must sit beside this file.
+The reduction lives in `reducer.py`, which must sit beside this file; it is
+imported by path, not by name, so neither module needs to be on sys.path.
 
-Single writer
--------------
-Every write — appending an event *and* replacing the snapshot — happens while
-this process holds the run lock. `append_event` takes the lock itself, so the
-read-last-seq/write-event pair is atomic and two concurrent appends can never
-be handed the same seq. A writer that finds someone else's live lock raises
-`RunLocked` rather than writing; resume-or-abort is the caller's decision.
+Two locks, two jobs
+-------------------
+They have different lifetimes, so they are different mechanisms:
 
-Holding the lock across several operations is re-entrant for the holder, and is
-delegated to child processes through the `CLODEX_LOCK_TOKEN` environment
-variable, so this works:
+* **`lock.json` — the session lock.** Who owns this run. Held across many
+  writes, carries the holder's PID and ISO timestamp, reports whether that
+  holder is still running, and is only ever removed explicitly (`break_lock`,
+  `unlock`). A writer that finds someone else's session lock raises `RunLocked`
+  rather than writing; resume-or-abort is the caller's decision. Ownership is
+  re-entrant for the holder and is delegated to child processes through the
+  `CLODEX_LOCK_TOKEN` environment variable.
 
-    with acquire_lock(run_dir):                       # one writer, many writes
+* **`write.lock` — the write lock.** An advisory `fcntl.flock` held for the
+  duration of every write, taken unconditionally: by the session-lock holder
+  and by every token-carrying delegate alike. Contention here is normal and
+  brief, so it waits (up to `WRITE_LOCK_TIMEOUT`) instead of refusing. This is
+  what actually serializes writers, so the session lock never has to designate
+  a writer *set* that can race with itself.
+
+Because of the write lock, delegates may run concurrently:
+
+    with acquire_lock(run_dir):                       # this session owns the run
         append_event(run_dir, {"e": "run:opened"})
         atomic_write_snapshot(run_dir, rebuild(run_dir))
-        subprocess.run([... "clodex_state.py", "append", run_dir], ...)  # inherits it
+        subprocess.run([... "clodex_state.py", "append", run_dir], ...)   # any number,
+        subprocess.run([... "clodex_state.py", "append", run_dir], ...)   # in parallel
 
-A lock is never broken implicitly, not even a dead holder's: `RunLocked` and
-`status` report whether the holder is still running, and `break_lock()` /
-`unlock` remove it once the caller has decided.
+Nothing an ordinary call can do puts an unreadable event into the log:
+`append_event` reduces the log plus the candidate event *before* writing, so an
+event that would break the run is refused while the log is still clean.
 
 Library use:
 
@@ -55,46 +67,76 @@ CLI exit codes:
        refreshed. DO NOT retry the append — it would double-write an
        append-only log. `rebuild` still reports correct state.
 
-Stdlib only, Python 3.9+.
+Stdlib only, Python 3.9+. POSIX (uses fcntl).
 """
 
 import argparse
+import errno
+import fcntl
+import importlib.util
 import json
 import logging
 import os
 import secrets
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from reducer import (  # re-exported: five skills import the API from this module
-    SCHEMA_VERSION,
-    STAGES,
-    ClodexStateError,
-    ReducerInvariantError,
-    load_schema,
-    reduce_events,
-    validate,
-)
 
-#: The surface the clodex skills depend on. The reducer lives in reducer.py;
-#: its names are re-exported here so callers need only import this module.
+def _import_sibling(name):
+    """Import a module shipped beside this file, by path.
+
+    Not `import <name>`: that only resolves when this directory happens to be
+    on sys.path (true for `python3 clodex_state.py`, false when this module is
+    loaded by path), and it would happily bind to any other module of the same
+    generic name that reached sys.path first.
+    """
+    module_name = "clodex_state_" + name
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name + ".py")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError("clodex state engine is incomplete: %s is missing" % path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+reducer = _import_sibling("reducer")
+
+# Re-exported so callers need only import this module.
+SCHEMA_VERSION = reducer.SCHEMA_VERSION
+STAGES = reducer.STAGES
+ClodexStateError = reducer.ClodexStateError
+ReducerInvariantError = reducer.ReducerInvariantError
+load_schema = reducer.load_schema
+validate = reducer.validate
+reduce_events = reducer.reduce_events
+
+#: The surface the clodex skills depend on.
 __all__ = [
     "SCHEMA_VERSION", "STAGES",
     "ClodexStateError", "ReducerInvariantError", "RunLocked",
     "append_event", "rebuild", "load_snapshot", "atomic_write_snapshot",
     "acquire_lock", "break_lock", "Lock",
-    "events_path", "snapshot_path", "lock_path",
+    "events_path", "snapshot_path", "lock_path", "write_lock_path",
     "load_schema", "validate", "reduce_events",
 ]
 
 EVENTS_FILE = "events.ndjson"
 SNAPSHOT_FILE = "run.json"
 LOCK_FILE = "lock.json"
+WRITE_LOCK_FILE = "write.lock"
 
-#: Set while a Lock is held; lets a child process act as the same writer.
+#: Set while a session Lock is held; lets a child process act as the same owner.
 LOCK_TOKEN_ENV = "CLODEX_LOCK_TOKEN"
+
+#: Writes are short, so waiting is right; this only bounds a pathological wait.
+WRITE_LOCK_TIMEOUT = 30.0
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -105,13 +147,13 @@ _LOG = logging.getLogger("clodex.state")
 
 
 class RunLocked(ClodexStateError):
-    """Another writer holds the run lock."""
+    """Another writer holds the run's session lock."""
 
     def __init__(self, run_dir, pid=None, acquired_at=None, holder_alive=None):
         self.run_dir = str(run_dir)
         self.pid = pid
         self.acquired_at = acquired_at
-        #: True/False when the holder's liveness is known, None when it is not.
+        #: True or False when the holder's liveness is known, None when it is not.
         self.holder_alive = holder_alive
         liveness = {True: "running", False: "not running", None: "liveness unknown"}[holder_alive]
         super().__init__(
@@ -136,6 +178,10 @@ def lock_path(run_dir):
     return os.path.join(str(run_dir), LOCK_FILE)
 
 
+def write_lock_path(run_dir):
+    return os.path.join(str(run_dir), WRITE_LOCK_FILE)
+
+
 def _now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
@@ -150,15 +196,79 @@ def _fsync_dir(path):
 
 
 # --------------------------------------------------------------------------- #
-# lock
+# write lock — mutual exclusion between writers
+# --------------------------------------------------------------------------- #
+
+#: realpath -> [fd, depth]. flock is per open file description, so a second
+#: flock from this same process would block against our own first one.
+_WRITE_LOCKS = {}
+
+_WOULD_BLOCK = (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK)
+
+
+def _flock_until(fd, run_dir, timeout):
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError as exc:
+            if exc.errno not in _WOULD_BLOCK:
+                raise
+            if time.monotonic() >= deadline:
+                raise ClodexStateError(
+                    "timed out after %gs waiting to write %s; another writer is not finishing"
+                    % (timeout, run_dir)
+                )
+            time.sleep(0.005)
+
+
+@contextmanager
+def _write_lock(run_dir, timeout=WRITE_LOCK_TIMEOUT):
+    """Serialize writers: the session-lock holder and its delegates alike.
+
+    The lockfile is never unlinked. Removing it would let one process hold an
+    flock on an inode another process has already replaced.
+    """
+    key = os.path.realpath(str(run_dir))
+    held = _WRITE_LOCKS.get(key)
+    if held is not None:  # already ours: re-enter rather than deadlock on our own flock
+        held[1] += 1
+        try:
+            yield
+        finally:
+            held[1] -= 1
+        return
+
+    os.makedirs(key, exist_ok=True)
+    fd = os.open(write_lock_path(key), os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        _flock_until(fd, key, timeout)
+    except BaseException:
+        os.close(fd)
+        raise
+
+    _WRITE_LOCKS[key] = [fd, 1]
+    try:
+        yield
+    finally:
+        del _WRITE_LOCKS[key]
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+# --------------------------------------------------------------------------- #
+# session lock — who owns the run
 # --------------------------------------------------------------------------- #
 
 def _read_lock(run_dir):
-    """The lock holder: None if there is no lockfile, else a dict.
+    """The session-lock holder: None if there is no lockfile, else a dict.
 
     A lockfile that exists but cannot be read yields `{}` — present, holder
     unknown — never None. Reporting an unreadable lock as "no lock" would let a
-    snapshot write proceed where `O_EXCL` would still refuse.
+    write proceed where `O_EXCL` would still refuse.
     """
     try:
         with open(lock_path(run_dir), "r", encoding="utf-8") as handle:
@@ -170,9 +280,16 @@ def _read_lock(run_dir):
     return holder if isinstance(holder, dict) else {}
 
 
-def _pid_alive(pid):
+def _holder_liveness(holder):
+    """True / False / None — None when the holder cannot be identified at all.
+
+    An unidentifiable holder is *unknown*, never "not running": a lockfile can
+    be observed in the window between its exclusive create and its payload
+    write, and that holder is very much alive.
+    """
+    pid = (holder or {}).get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-        return False
+        return None
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -198,12 +315,12 @@ def _locked_error(run_dir, holder):
         run_dir,
         holder.get("pid"),
         holder.get("acquired_at"),
-        holder_alive=_pid_alive(holder.get("pid")),
+        holder_alive=_holder_liveness(holder),
     )
 
 
 class Lock:
-    """The run's single-writer lock. Acquired on construction, released on exit.
+    """The run's session lock. Acquired on construction, released on exit.
 
     Raises RunLocked if anyone already holds it — another process, or this one.
     """
@@ -218,25 +335,28 @@ class Lock:
         self._restore_token = None
 
         os.makedirs(self.run_dir, exist_ok=True)
-        try:
-            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            raise _locked_error(self.run_dir, _read_lock(self.run_dir))
+        # Under the write lock so that break_lock cannot read a holder and then
+        # unlink the different lock we create in between.
+        with _write_lock(self.run_dir):
+            try:
+                fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                raise _locked_error(self.run_dir, _read_lock(self.run_dir))
 
-        payload = {"pid": self.pid, "acquired_at": self.acquired_at, "token": self.token}
-        try:
+            payload = {"pid": self.pid, "acquired_at": self.acquired_at, "token": self.token}
             try:
-                os.write(fd, (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"))
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        except BaseException:
-            # We created the file; if we could not fill it, we must not leave it.
-            try:
-                os.unlink(self.path)
-            except OSError:
-                pass
-            raise
+                try:
+                    os.write(fd, (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"))
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            except BaseException:
+                # We created the file; if we could not fill it, we must not leave it.
+                try:
+                    os.unlink(self.path)
+                except OSError:
+                    pass
+                raise
 
         self._restore_token = os.environ.get(LOCK_TOKEN_ENV)
         os.environ[LOCK_TOKEN_ENV] = self.token
@@ -264,39 +384,51 @@ class Lock:
 
 
 def acquire_lock(run_dir):
-    """Take the run lock, or raise RunLocked carrying the holder's PID and time."""
+    """Take the run's session lock, or raise RunLocked carrying the holder's PID and time."""
     return Lock(run_dir)
 
 
 @contextmanager
 def _writer(run_dir):
-    """Hold the run lock for one write, unless this writer already holds it."""
+    """Everything a write needs: the run's session lock, plus mutual exclusion.
+
+    The session lock says this run is ours (taking it if nobody holds it); the
+    write lock serializes this write against every other writer, including the
+    concurrent delegates that share our session token.
+    """
     if _holds_lock(_read_lock(run_dir)):
-        yield None
+        with _write_lock(run_dir):
+            yield None
         return
     lock = Lock(run_dir)
     try:
-        yield lock
+        with _write_lock(run_dir):
+            yield lock
     finally:
         lock.release()
 
 
 def break_lock(run_dir, force=False):
-    """Remove the run's lockfile. Returns the holder it removed, or None.
+    """Remove the run's session lock. Returns the holder it removed, or None.
 
-    Refuses while the holder process is still running unless `force` is set —
-    a live lock is the caller's resume-or-abort decision, never this module's.
+    Refuses unless the holder is known to be gone — a live holder, or one that
+    cannot be identified, is the caller's resume-or-abort decision, never this
+    module's. `force` overrides, and is a last resort.
     """
-    holder = _read_lock(run_dir)
-    if holder is None:
+    if _read_lock(run_dir) is None:
         return None
-    if _pid_alive(holder.get("pid")) and not force:
-        raise _locked_error(run_dir, holder)
-    try:
-        os.unlink(lock_path(run_dir))
-    except FileNotFoundError:
-        pass
-    return holder
+    # Under the write lock: read and unlink must not straddle another acquire.
+    with _write_lock(run_dir):
+        holder = _read_lock(run_dir)
+        if holder is None:
+            return None
+        if _holder_liveness(holder) is not False and not force:
+            raise _locked_error(run_dir, holder)
+        try:
+            os.unlink(lock_path(run_dir))
+        except FileNotFoundError:
+            pass
+        return holder
 
 
 # --------------------------------------------------------------------------- #
@@ -393,11 +525,15 @@ def _stamp(event, seq, timestamp):
 def append_event(run_dir, event):
     """Append one event to the log and fsync it. Returns the assigned seq.
 
-    Held under the run lock, so reading the last seq and writing the new line
-    are atomic against other writers; raises RunLocked if someone else holds it.
-    The caller supplies the payload and `e`; seq, schema_version and (unless
-    given) `t` are stamped here. The write is durable before this returns, so a
-    dependent snapshot replacement or external action can safely follow.
+    Refuses, without writing, any event the reducer could not then read: the
+    log plus the candidate is reduced first, so an ordinary call can never
+    leave a run unreadable. Raises ReducerInvariantError in that case.
+
+    Runs under the run lock, so reading the last seq and writing the new line
+    are atomic against other writers; raises RunLocked if another session owns
+    the run. The caller supplies the payload and `e`; seq, schema_version and
+    (unless given) `t` are stamped here. The write is durable before this
+    returns, so a dependent snapshot replacement or external action can follow.
     """
     if not isinstance(event, dict):
         raise ClodexStateError("event must be a JSON object, got %s" % type(event).__name__)
@@ -409,14 +545,16 @@ def append_event(run_dir, event):
     with _writer(run_dir):
         created = not os.path.exists(path)
         if created:
-            seq = 1
+            events = []
         else:
             _repair_torn_tail(path)
-            seq = _last_seq(_read_events(run_dir)) + 1
+            events = _read_events(run_dir)
 
+        seq = _last_seq(events) + 1
         record = _stamp(event, seq, _now_iso())
-        line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+        reduce_events(events + [record])  # refuse before the log is touched
 
+        line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             os.write(fd, line.encode("utf-8"))
@@ -495,13 +633,9 @@ def _cmd_append(args):
     if not isinstance(event, dict):
         raise ClodexStateError("stdin must hold one JSON object")
 
+    # One writer for the pair, so no other writer lands between the event and
+    # the snapshot that describes it. append_event does its own vetting.
     with _writer(args.run_dir):
-        # Dry-run the reduction first. reduce_events validates the snapshot it
-        # produces, so an event that would make this run unwritable never
-        # enters the log.
-        existing = _read_events(args.run_dir)
-        reduce_events(existing + [_stamp(event, _last_seq(existing) + 1, _now_iso())])
-
         seq = append_event(args.run_dir, event)
         try:
             atomic_write_snapshot(args.run_dir, rebuild(args.run_dir))
@@ -558,9 +692,9 @@ def _cmd_status(args):
     # A live lock is what a second invocation needs in order to offer resume-or-abort.
     holder = _read_lock(args.run_dir)
     if holder is not None:
-        alive = _pid_alive(holder.get("pid"))
+        liveness = {True: "running", False: "not running", None: "liveness unknown"}
         print("lock:      held by pid %s (%s) since %s" % (
-            holder.get("pid"), "running" if alive else "not running", holder.get("acquired_at"),
+            holder.get("pid"), liveness[_holder_liveness(holder)], holder.get("acquired_at"),
         ))
     return EXIT_OK
 
@@ -588,14 +722,14 @@ def main(argv=None):
         ("append", _cmd_append, "append one JSON event read from stdin; prints the assigned seq"),
         ("rebuild", _cmd_rebuild, "print the snapshot rebuilt from the event log"),
         ("status", _cmd_status, "print a short summary of the run"),
-        ("unlock", _cmd_unlock, "remove the lockfile of a holder that is no longer running"),
+        ("unlock", _cmd_unlock, "remove the session lock of a holder that is no longer running"),
     ):
         sub = subcommands.add_parser(name, help=help_text)
         sub.add_argument("run_dir", help="the run's directory")
         if name == "unlock":
             sub.add_argument(
                 "--force", action="store_true",
-                help="break the lock even though the holder is still running",
+                help="break the lock even though the holder is running or unidentifiable",
             )
         sub.set_defaults(handler=handler)
 
