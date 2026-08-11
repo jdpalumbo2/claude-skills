@@ -88,7 +88,9 @@ This stage appends five event types and no others: `stage:verify:entered`,
 `finding:disposed`.
 
 **Artifacts you produce — logs, screenshots, diffs, prompts — go in `$RUN_DIR`,
-which is gitignored. Never write one into the repo tree** (§2).
+which is gitignored.** The runner writes its own envelopes and logs under
+`${CLODEX_RUNNER_STATE_DIR:-$REPO/.clodex/runner}`, also gitignored. Nothing this
+stage produces lands anywhere else in the tree (§2).
 
 ---
 
@@ -126,7 +128,7 @@ for d in v["debt"]:     print("debt    ", d.get("class"), "|", d.get("reason"))'
 
 | What you find | You are | Go to |
 |---|---|---|
-| no `declared` lines | the plan declared no evidence — there is no definition of done to prove | Stop. Hand back to `clodex`; this is a plan defect, and the plan stage is closed to you. |
+| no `declared` lines | the plan declared no evidence — there is no definition of done to prove | Stop. This run cannot reach ship and cannot be left open: the plan stage is closed to you, and a run parked here blocks the next one (§8, outcome A). Hand back to `clodex` and ask it to **close** the run — or abandon it, if the work is not going ahead — naming the plan defect as the reason. |
 | no `evidence` and no `debt` lines | nothing produced yet | §2 |
 | some classes covered, some not | mid-stage | §4, then §5 for **only the uncovered classes** |
 | a finding with `disposition: "open"` | a finding you have not answered | §8 |
@@ -152,7 +154,7 @@ one-line fix that is obviously right.
 | `git commit`, `git add`, `git tag`, `git push`, `git checkout`, `git stash` | Commits belong to build and ship. A commit here is a delta nobody reviewed. |
 | Editing code, a test, a fixture, or a config to make a gate pass | That is build's work, under a batch contract, with a delta review. Here it is a **finding** (§8). |
 | Writing the changelog, bumping the version, tagging, deploying | `clodex-ship` closes all of those from this stage's evidence, under one authorization. |
-| Writing an artifact into the repo tree | Screenshots, logs, and diffs go in `$RUN_DIR`. A stray artifact in the tree becomes someone's next dirty-file problem. |
+| Writing an artifact anywhere but `$RUN_DIR` or the runner's own state dir | Screenshots, logs, and diffs go in `$RUN_DIR`; the runner writes its envelopes and logs under `${CLODEX_RUNNER_STATE_DIR:-<repo>/.clodex/runner}` itself. Both are gitignored. An artifact anywhere else becomes someone's next dirty-file problem. |
 | `codex --role implementer` | The implementer runs `workspace-write`. Every delegation this stage makes is read-only (§7). |
 
 If verification shows that code or tests must change, that is a finding, it goes
@@ -388,11 +390,22 @@ Build the diff of everything this run committed, then run the worker:
 START="$(python3 "$STATE" rebuild "$RUN_DIR" | python3 -c 'import json,sys;print(json.load(sys.stdin)["git"]["start_head"])')"
 git diff "$START" HEAD > "$RUN_DIR/verify.diff"
 PROMPT="$RUN_DIR/tests-review.prompt.md"      # written with your file tool, never a shell string
-OUT="$(bash "$RUNNER" --role code-reviewer --repo "$REPO" \
-        --prompt-file "$PROMPT" --input "$RUN_DIR/verify.diff" --input "$PLAN")"; RC=$?
-printf 'rc=%s line=%s\n' "$RC" "$OUT"
-ENVELOPE="${OUT#* }"     # strip the FIRST word only — a repo path may contain spaces
+if [ -z "$PLAN" ]; then
+    echo "this run has no plan path — there is nothing to review against; stop and hand back (§1)"
+else
+    OUT="$(bash "$RUNNER" --role code-reviewer --repo "$REPO" \
+            --prompt-file "$PROMPT" --input "$RUN_DIR/verify.diff" --input "$PLAN")"; RC=$?
+    printf 'rc=%s line=%s\n' "$RC" "$OUT"
+    ENVELOPE="${OUT#* }"   # strip the FIRST word only — a repo path may contain spaces
+fi
 ```
+
+**The `$PLAN` guard is not decoration.** §0 defines it as `plan.path or ""`, and
+an empty one makes the runner die with exit **64** and `input artifact not found:`
+before codex ever starts — a usage error you would then debug as if the worker
+had failed. A run at `verify` whose `plan.path` is null is a broken run anyway:
+the whole assignment is "does this prove what the plan says", so there is nothing
+to ask.
 
 **The role is `code-reviewer`, always.** The runner puts it in codex's
 `read-only` sandbox, so it cannot edit your tree even if the prompt slipped.
@@ -423,10 +436,13 @@ blocker/high/medium for anything that would let a real defect ship; low/info for
 improvements. Return an empty findings list if you find nothing.
 ```
 
-The findings schema is the runner's, not one you invent: each finding arrives
-with an id (`F001`, `F002`, …), a `severity` from
-`blocker|high|medium|low|info`, a `summary`, a `detail`, and a `location` — the
-`$defs.model_report` section of `$CLODEX_HOME/runner/envelope.schema.json`.
+The findings schema is the runner's, not one you invent: read the envelope's
+`findings[]`, where each entry has an `id` **minted by the runner** (`F001`,
+`F002`, … in the order the model reported them) plus the four fields the model
+itself wrote — `severity` from `blocker|high|medium|low|info`, `summary`,
+`detail`, `location`. Those four are `$defs.model_report` in
+`$CLODEX_HOME/runner/envelope.schema.json`; `id` is not there, because the model
+never supplies it.
 
 The runner prints one line, `"<status> <envelope-path>"`, and **its exit code is
 the authority**. Never read status out of prose or stderr.
@@ -501,9 +517,39 @@ which declared class it touches. Then take their call, which is one of three:
 
 | They choose | You do |
 |---|---|
-| **A follow-on run fixes it** | Hand back to `clodex` with the run dir. It owns opening a run, and the new one carries this run's id as its `parent`. This run stays where it is. |
-| **They fix and commit it themselves** | Re-run the affected gate (§4) and the affected class (§5). Dispose `fixed` **only once the gate is green**, with their commit sha in the `note`. §10 will show HEAD moved; explain it there. |
-| **They accept it** | `accepted`, their words in the `note`. It stands as a known risk and ship's final review reads it. |
+| **A — a follow-on run fixes it** | **This run ends here.** It cannot reach ship, so §10 and §11 do not apply — use the block below instead. |
+| **B — they fix and commit it themselves** | Re-run the affected gate (§4) and the affected class (§5). Dispose `fixed` **only once the gate is green**, with their commit sha in the `note`. §10 will print `SOMETHING COMMITTED DURING VERIFY`; carry that sha into the handoff (§11, item 5). |
+| **C — they accept it** | `accepted`, their words in the `note`. It stands as a known risk and ship's final review reads it. The run continues to §10. |
+
+#### Outcome A in full — it is the one with a trap in it
+
+Say this, in this shape:
+
+> clodex, run dir `<the absolute run dir>` — verification found `<finding id>`,
+> which needs a code change. This run cannot re-enter build, so it has to be
+> **closed** before the follow-on can open with `parent` set to `<this run id>`.
+
+**You append neither event.** `run:closed` and `run:opened` belong to the router
+— §0 lists the five events that are yours — and `clodex` already owns both: its
+§2 offers Close on an open run, its §6 opens the new one.
+
+**Leave the finding `open`.** The reducer accepts `run:closed` with an open
+finding, and a closed run carrying an unresolved finding is the honest record:
+the run ended, and that is what it ended on. Do not invent a disposition to tidy
+the log, and do not run §10 looking for `VERIFY COMPLETE` — an open finding is a
+blocker there, correctly, because §10 answers "may this go to ship?" and this
+path is not going to ship.
+
+**Why it must be closed, not merely left behind.** The router allows one open run
+per repo (`clodex` §2), so a run parked at `verify` stops the follow-on from
+opening at all — and the router's resume offer routes stage `verify` straight
+back to this skill. That loop is exactly what this outcome exists to avoid, and
+leaving the run open recreates it.
+
+**What it costs — say this out loud as well.** This run's evidence and debt die
+with it: they never reach a release authorization, and the follow-on run has to
+produce them again from scratch. That is the price of a one-way state machine. It
+is not a reason to relabel the finding as something that lets the run continue.
 
 **A red gate is not debt.** Debt is a class whose evidence could not be
 produced; a red gate is evidence that was produced and came back negative.
@@ -607,9 +653,24 @@ head = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
 print("HEAD %s, last committed by the run %s -> %s" % (
     head[:8], (expected or "-")[:8],
     "unchanged" if head == expected else "SOMETHING COMMITTED DURING VERIFY"))
-tracked = subprocess.check_output(
+
+
+def under(path, prefix):                  # path IS prefix, or sits inside it
+    return path == prefix.rstrip("/") or path.startswith(prefix.rstrip("/") + "/")
+
+
+acknowledged = snap["git"]["dirty_at_start"]
+raw = subprocess.check_output(
     ["git", "status", "--porcelain", "--untracked-files=no"]).decode().rstrip("\n")
-print("tracked files modified:", tracked.replace("\n", " | ") or "(none)")
+theirs, since = [], []
+for line in (raw.split("\n") if raw else []):
+    entry = line[3:]
+    paths = entry.split(" -> ") if " -> " in entry else [entry]   # a rename: both sides
+    bucket = theirs if all(any(under(p, d) for d in acknowledged) for p in paths) else since
+    bucket.append(line)
+print("tracked, dirty before the run opened:", " | ".join(theirs) or "(none)",
+      "— the user's, not a finding")
+print("tracked, modified since:", " | ".join(since) or "(none)")
 
 print("debt entries: %d  (not a blocker — ship accepts debt, verify does not)" % len(ver["debt"]))
 for b in blockers:
@@ -621,15 +682,23 @@ PY
 **Debt never appears in `blockers`.** A run with four debt entries prints
 `VERIFY COMPLETE`. That is the design, not an oversight: this stage has no gate.
 
-Two lines it prints that are yours to interpret, not the script's:
+Three lines it prints are yours to interpret, not the script's. Every one of them
+that fires goes into the handoff as §11's item 5:
 
-- **`SOMETHING COMMITTED DURING VERIFY`** — verify makes no commits, so either
-  the user committed a fix (§8, second row: say so in the handoff and name the
-  sha) or this stage broke its own rule (§2), which ship needs to hear about.
-- **`tracked files modified`** — a suite that rewrites snapshots or a formatter
+- **`SOMETHING COMMITTED DURING VERIFY`** — verify makes no commits, so it is one
+  of three: the user committed a fix (§8, row B), the user committed unrelated
+  work of their own mid-session, or this stage broke its own rule (§2). Name
+  which, with the sha — `git log --oneline <expected>..HEAD` shows what landed.
+  The first two are facts ship needs; the third is a defect ship needs.
+- **`tracked, modified since`** — a suite that rewrites snapshots, a formatter
   that ran as a side effect. You do not commit it and you do not revert it: it is
   a finding (§8), and it means the gate mutates the tree, which ship's commit
   step would otherwise sweep up.
+- **`tracked, dirty before the run opened`** — the user's own uncommitted work,
+  acknowledged at run open and subtracted here on purpose. **It is not a
+  finding**, it is not yours to stage, revert, or clean, and recording one would
+  put someone else's work in front of ship's final review forever. Repos where a
+  clodex run coexists with unrelated edits are the normal case, not the odd one.
 
 ---
 
@@ -642,8 +711,8 @@ the manifest does not record it.
 
 Do not append `stage:ship:entered`. Each stage appends its own entry event.
 
-Say these four things in chat, in this order — this is the only prose that
-matters, because ship reads the manifest for everything else:
+Say these things in chat, in this order — this is the prose that matters, because
+ship reads the manifest for everything else:
 
 1. **The gates**, as §4 printed them: each command and its rc, and each null one.
 2. **Evidence, per class**: the class and one line of what proved it.
@@ -652,9 +721,16 @@ matters, because ship reads the manifest for everything else:
 4. **One sentence naming where it gets decided**: *"`clodex-ship` will put this
    debt in the release authorization — that is where it is accepted, and nothing
    about it has been accepted yet."*
+5. **Only when §10 printed one of its interpretive lines** — omit this item
+   entirely otherwise: the commit that landed during verify and its sha, or the
+   tracked files modified since the run opened and what you concluded about them.
+   These are facts about the tree that live in no event, so this sentence is the
+   only way they reach ship. The acknowledged-dirt line is **not** one of them
+   and is never repeated here.
 
-Carry nothing else forward in prose. If a fact matters to ship, it is in the
-plan file, a commit, or the log — or it does not exist.
+Beyond those five, carry nothing forward in prose. If a fact matters to ship, it
+is in the plan file, a commit, the log — or in item 5, which exists precisely
+because §10 found something none of the other three can hold.
 
 ---
 
@@ -667,6 +743,8 @@ plan file, a commit, or the log — or it does not exist.
 | Fixing a failing test, or a one-line code fix, because it is obviously right | Verify never edits tracked files. It is a finding, and the fix belongs to build — which this run cannot re-enter (§8). |
 | Committing anything | Commit authority is `clodex-build` and `clodex-ship`, nowhere else (§2). |
 | Handing the run back to `clodex-build` to fix something | Refused: *"stage would move backwards, verify -> build"*, and build bounces a verify-stage run. The three legal ways forward are in §8. |
+| Leaving the run open at `verify` after handing a code-change finding back | The router allows one open run per repo, so the follow-on can never open — and the resume offer routes stage `verify` straight back here. Outcome A ends the run through `clodex` (§8). |
+| Recording a finding about a file that was already dirty when the run opened | §10 subtracts `git.dirty_at_start` on purpose. The user's uncommitted work is not this run's finding, and a finding lives in the log forever, in front of ship's final review (§10). |
 | Recording a red gate as debt | Debt is evidence deferred; a red gate is evidence produced and negative. Recording it as debt hands ship the wrong label for a live defect (§8). |
 | `[ -n "$CMD" ] && bash -c "$CMD"; printf 'rc=%s' "$?"` for a gate | With a null command the test is what fails and it prints `rc=1` — a red gate in a repo that has none. Explicit `if`/`else` (§4). |
 | Treating a null gate command as debt | Null is a recorded fact about the repo, not a deferral. It becomes debt only when a declared class depended on it (§4). |
