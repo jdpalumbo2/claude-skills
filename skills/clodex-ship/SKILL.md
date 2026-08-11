@@ -585,111 +585,16 @@ Rules that make this message the gate rather than a summary of one:
 - **Exact descriptors, not prose.** Each action shows `id`, the **filled** argv,
   `cwd`, `target`, `env_refs`, and its policy — plus, for the `bookkeeping` step
   which runs no command, `writes` (the files), `version` (the number the user just
-  settled) and `changelog` (the exact lines). Those last three are how the
-  manifest answers *"which version and which text did the human agree to?"*
-  without anyone re-reading a transcript, and §8's bookkeeping reconcile compares
-  the files on disk against them. `env_refs` are names; a value never appears in
-  this message, in a log, or in an event.
+  settled), `tag` (the release tag, when this repo tags) and `changelog` (the
+  exact text). Those four are how the manifest answers *"which version, which tag
+  and which text did the human agree to?"* without anyone re-reading a
+  transcript; §7.2's compare holds the files on disk to them, and `{version}` and
+  `{tag}` in any profile argv are resolved from them. `env_refs` are names; a
+  value never appears in this message, in a log, or in an event.
 - **Every descriptor carries its `step`**, one of §6's six names. That is what
   lets §10 check that each authorized action actually ran — an authorization for a
   push, with no `done` push step and no reason saying why, is the "tagged but
   never pushed" release the whole state machine exists to prevent.
-
-**Then validate the payload before you append it.** Every check below could also
-be made at execution time, and §6 repeats the load-bearing ones — but a release
-that fails halfway has already committed, tagged and pushed, and those do not
-come back. This is the last moment where "no" costs nothing:
-
-```bash
-python3 - "$STATE" "$RUN_DIR" "$PROFILE" "$RUN_DIR/authorization.json" <<'PY'
-import json, os, subprocess, sys
-state, run_dir, profile_path, payload_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-STEPS = ("bookkeeping", "commit", "tag", "push", "deploy", "verify-live")
-LOCAL = ("bookkeeping", "release-commit", "release-tag")
-TOKENS = ("version", "tag", "branch", "run", "commit")     # the whole placeholder vocabulary
-FIELDS = ("id", "step", "argv", "cwd", "target", "env_refs", "policy")
-snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
-try:
-    prof = json.load(open(profile_path))
-except (OSError, ValueError) as exc:
-    raise SystemExit("DO NOT APPEND — cannot read %s: %s" % (profile_path, exc))
-payload, problems = json.load(open(payload_path)), []
-
-book = [x for x in payload.get("actions", []) if x.get("id") == "bookkeeping"]
-values = {"version": (book[0].get("version") if book else None) or "",
-          "tag": (book[0].get("tag") if book else None) or "",
-          "branch": subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                                            cwd=snap["repo"]).decode().strip(),
-          "run": snap["run"] or ""}
-def fill(word, misses):
-    for name in TOKENS:
-        token = "{%s}" % name
-        if token in word:
-            if not values.get(name):
-                misses.append(name)
-            word = word.replace(token, values.get(name, ""))
-    return word
-
-prof_acts = dict((a["id"], a) for a in prof["actions"])
-for act in payload.get("actions", []):
-    tag = act.get("id") or "<descriptor with no id>"
-    for f in FIELDS:
-        if f not in act:
-            problems.append("%s: no %r — every descriptor carries all of %s"
-                            % (tag, f, ", ".join(FIELDS)))
-    if act.get("step") not in STEPS:
-        problems.append("%s: step %r is not one of %s" % (tag, act.get("step"), ", ".join(STEPS)))
-    if act.get("id") in prof_acts:
-        want = prof_acts[act["id"]]
-        if act.get("policy") != want["policy"]:
-            problems.append("%s: policy %r, but the profile says %r — the profile wins"
-                            % (tag, act.get("policy"), want["policy"]))
-        misses = []
-        expected = [fill(w, misses) for w in want["argv"]]
-        if misses:
-            problems.append("%s: its argv needs %s, which this run cannot supply. {commit} never "
-                            "can — the release commit does not exist yet, and there is no second "
-                            "authorization to fill it in later (§4)."
-                            % (tag, ", ".join("{%s}" % m for m in sorted(set(misses)))))
-        elif expected != act.get("argv"):
-            problems.append("%s: argv is not the profile's resolved from run state:\n"
-                            "         profile resolves to: %s\n         proposed:            %s"
-                            % (tag, json.dumps(expected), json.dumps(act.get("argv"))))
-    elif act.get("id") not in LOCAL:
-        problems.append("%s: in neither .clodex/profile.json nor %s — a new action is added to the "
-                        "profile and committed first" % (tag, ", ".join(LOCAL)))
-    for w in act.get("argv") or []:
-        for n in TOKENS:
-            if "{%s}" % n in w:
-                problems.append("%s: argv still holds {%s}; §6 substitutes nothing, so it would be "
-                                "passed to the command as literal text" % (tag, n))
-
-if len(book) != 1:
-    problems.append("expected exactly one bookkeeping descriptor, found %d" % len(book))
-elif not (book[0].get("version") and book[0].get("changelog")):
-    problems.append("bookkeeping: version and changelog are both required — §7.2 compares the "
-                    "files on disk against them before anything is staged")
-
-key = lambda d: json.dumps([d.get("class"), d.get("reason"), d.get("risk")], sort_keys=True)
-for missing in sorted({key(d) for d in snap["verification"]["debt"]}
-                      - {key(d) for d in payload.get("accepted_debt", [])}):
-    problems.append("this authorization does not accept recorded debt: %s" % missing)
-
-for p in problems:
-    print("PROBLEM:", p)
-print("AUTHORIZATION VALID — append it" if not problems
-      else "DO NOT APPEND — %d problem(s)" % len(problems))
-PY
-```
-
-`DO NOT APPEND` means go back to the user with a corrected message; it never
-means append anyway and deal with it at the step. Then:
-
-```bash
-python3 "$STATE" append "$RUN_DIR" < "$RUN_DIR/authorization.json"
-```
-
-For reference, the payload that validator reads:
 - **`always-ask-exact` is presented literally, every time.** Never folded into
   "and then deploys", never abbreviated with an ellipsis, never batched with its
   neighbours — here **and** again immediately before each execution, including on
@@ -709,7 +614,7 @@ For reference, the payload that validator reads:
   yes to that; you never append an approval covering part of what you showed.
   Record what they approved, not what you proposed.
 
-On yes, write the payload to `$RUN_DIR/authorization.json` — with the actions
+**On yes, write the payload to `$RUN_DIR/authorization.json`** — with the actions
 exactly as shown and the debt items copied verbatim from `verification.debt`:
 
 ```json
@@ -750,12 +655,20 @@ exactly as shown and the debt items copied verbatim from `verification.debt`:
 - **`verify-live` gets no descriptor.** Its checks are reads (§2), so they are not
   actions and `<N>` does not count them. The message lists them so the user knows
   what will be run against the live system; the authorized set is the descriptors.
+- **A profile-backed descriptor is that profile entry, resolved — every field of
+  it.** `argv`, `cwd`, `env_refs`, `target`, `policy`: whatever
+  `.clodex/profile.json` declares for that id is what the descriptor says, with
+  `{version}` / `{tag}` / `{branch}` / `{run}` filled in. You are transcribing,
+  not composing, and the validator below compares the **whole entry** rather than
+  a list of fields somebody remembered to check.
 - The three local steps carry the ids `bookkeeping`, `release-commit`,
-  `release-tag`; every other id comes from `profile.actions` and must match it
-  exactly. `bookkeeping` runs no command, so its `argv` is `null` and its `writes`
-  list the files instead.
-- `policy` is copied from the profile for profile actions; the local three are
-  `auto-with-authorization`, which is exactly what this message grants.
+  `release-tag` and have no profile entry, so their fields are yours to write.
+  `bookkeeping` runs no command: its `argv` is `null` and its `writes` list the
+  files instead.
+- **A repo with no changelog and no version source writes nothing**, so it gets
+  **no `bookkeeping` descriptor and no `release-commit`** — §4's step list already
+  prints that shape, and the validator expects their absence rather than merely
+  tolerating it.
 - **Always pass `plan_hash`, recomputed from the file.** An approval against any
   other hash is refused: *"approval binds to plan hash 'X' but the current plan
   hash is 'Y'"*.
@@ -767,6 +680,119 @@ exactly as shown and the debt items copied verbatim from `verification.debt`:
   branch → stop, and settle §4 item 3 first. Mismatch on the remote → stop; the
   profile and this checkout disagree about where this repo publishes, and that is
   the user's to resolve.
+
+**Then validate the payload before you append it.** Every check here could also be
+made at execution time, and §6 repeats the load-bearing ones — but a release that
+fails halfway has already committed, tagged and pushed, and those do not come
+back. This is the last moment where "no" costs nothing:
+
+```bash
+python3 - "$STATE" "$RUN_DIR" "$PROFILE" "$RUN_DIR/authorization.json" <<'PY'
+import json, subprocess, sys
+state, run_dir, profile_path, payload_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+STEPS = ("bookkeeping", "commit", "tag", "push", "deploy", "verify-live")
+LOCAL = ("bookkeeping", "release-commit", "release-tag")
+TOKENS = ("version", "tag", "branch", "run", "commit")     # the whole placeholder vocabulary
+snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
+try:
+    prof = json.load(open(profile_path))
+except (OSError, ValueError) as exc:
+    raise SystemExit("DO NOT APPEND — cannot read %s: %s" % (profile_path, exc))
+payload, problems = json.load(open(payload_path)), []
+
+book = [x for x in payload.get("actions", []) if x.get("id") == "bookkeeping"]
+values = {"version": (book[0].get("version") if book else None) or "",
+          "tag": (book[0].get("tag") if book else None) or "",
+          "branch": subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                                            cwd=snap["repo"]).decode().strip(),
+          "run": snap["run"] or ""}
+def resolve(value, misses):
+    """The profile's own value, with placeholders filled, at any depth."""
+    if isinstance(value, str):
+        for name in TOKENS:
+            if "{%s}" % name in value:
+                if not values.get(name):
+                    misses.append(name)
+                value = value.replace("{%s}" % name, values.get(name, ""))
+        return value
+    if isinstance(value, list):
+        return [resolve(v, misses) for v in value]
+    return value
+
+prof_acts = dict((a["id"], a) for a in prof["actions"])
+for act in payload.get("actions", []):
+    tag = act.get("id") or "<descriptor with no id>"
+    if act.get("step") not in STEPS:
+        problems.append("%s: step %r is not one of %s" % (tag, act.get("step"), ", ".join(STEPS)))
+    if act.get("id") in prof_acts:
+        # The WHOLE profile entry, field by field, with no allowlist: a field the
+        # profile declares and the descriptor omits, empties, or contradicts is a
+        # refusal. `policy`, then `step`, then `cwd` and `env_refs` were each
+        # found uncompared in turn; comparing the entry is what ends that.
+        misses = []
+        for key, declared in sorted(prof_acts[act["id"]].items()):
+            if key == "id":
+                continue
+            expected = resolve(declared, misses)
+            if key not in act:
+                problems.append("%s: the profile declares %s = %s and the descriptor has no %s"
+                                % (tag, key, json.dumps(expected), key))
+            elif act[key] != expected:
+                problems.append("%s: %s is %s but the profile declares %s — the profile wins"
+                                % (tag, key, json.dumps(act[key]), json.dumps(expected)))
+        for m in sorted(set(misses)):
+            problems.append("%s: its profile entry needs {%s}, which this run cannot supply. %s"
+                            % (tag, m,
+                               "{commit} never can — the release commit does not exist yet, and "
+                               "there is no second authorization to fill it in later (§4)."
+                               if m == "commit" else
+                               "The bookkeeping descriptor records no %s." % m))
+    elif act.get("id") not in LOCAL:
+        problems.append("%s: in neither .clodex/profile.json nor %s — a new action is added to the "
+                        "profile and committed first" % (tag, ", ".join(LOCAL)))
+    for w in act.get("argv") or []:
+        for n in TOKENS:
+            if "{%s}" % n in w:
+                problems.append("%s: argv still holds {%s}; §6 substitutes nothing, so it would be "
+                                "passed to the command as literal text" % (tag, n))
+
+# A repo that writes nothing has nothing to book-keep and nothing to commit.
+writes = bool((prof.get("changelog") or {}).get("path")) or bool(prof["version"]["source"])
+if not writes:
+    for x in payload.get("actions", []):
+        if x.get("id") in ("bookkeeping", "release-commit"):
+            problems.append("%s: this repo has no changelog and no version source, so there is "
+                            "nothing to write and nothing for a release commit to contain (§4)"
+                            % x["id"])
+elif len(book) != 1:
+    problems.append("expected exactly one bookkeeping descriptor, found %d" % len(book))
+else:
+    for need in ("version", "changelog"):
+        if not book[0].get(need):
+            problems.append("bookkeeping: %s is required — §7.2 compares the files on disk against "
+                            "it before anything is staged" % need)
+    if prof["tag"]["enabled"] and not book[0].get("tag"):
+        problems.append("bookkeeping: tag is required — this repo tags releases (%s), and {tag} in "
+                        "any profile argv is resolved from it" % prof["tag"]["format"])
+
+key = lambda d: json.dumps([d.get("class"), d.get("reason"), d.get("risk")], sort_keys=True)
+for missing in sorted({key(d) for d in snap["verification"]["debt"]}
+                      - {key(d) for d in payload.get("accepted_debt", [])}):
+    problems.append("this authorization does not accept recorded debt: %s" % missing)
+
+for p in problems:
+    print("PROBLEM:", p)
+print("AUTHORIZATION VALID — append it" if not problems
+      else "DO NOT APPEND — %d problem(s)" % len(problems))
+PY
+```
+
+`DO NOT APPEND` means go back to the user with a corrected message; it never
+means append anyway and deal with it at the step. Then:
+
+```bash
+python3 "$STATE" append "$RUN_DIR" < "$RUN_DIR/authorization.json"
+```
 
 On no, or on "change this": nothing is appended, nothing runs, and you come back
 with a corrected message. There is no partial authorization.
@@ -879,14 +905,17 @@ values = {"version": (book[0].get("version") if book else None) or "",
           "branch": subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                                             cwd=snap["repo"]).decode().strip(),
           "run": snap["run"] or ""}
-def fill(word, misses):
-    for name in TOKENS:
-        token = "{%s}" % name
-        if token in word:
-            if not values.get(name):
-                misses.append(name)
-            word = word.replace(token, values.get(name, ""))
-    return word
+def resolve(value, misses):
+    if isinstance(value, str):
+        for name in TOKENS:
+            if "{%s}" % name in value:
+                if not values.get(name):
+                    misses.append(name)
+                value = value.replace("{%s}" % name, values.get(name, ""))
+        return value
+    if isinstance(value, list):
+        return [resolve(v, misses) for v in value]
+    return value
 
 left = [w for w in act["argv"] for n in TOKENS if "{%s}" % n in w]
 if left:
@@ -896,18 +925,27 @@ if left:
 
 prof_acts = dict((a["id"], a) for a in prof["actions"])
 if action_id in prof_acts:
-    want = prof_acts[action_id]
-    if act.get("policy") != want["policy"]:
-        stop("%r is %r in .clodex/profile.json but the authorization recorded %r — the profile wins"
-             % (action_id, want["policy"], act.get("policy")))
-    misses = []
-    expected = [fill(w, misses) for w in want["argv"]]
+    # Every field the profile declares, not a list of names kept in step by hand.
+    # `cwd` decides which package gets published; `env_refs` decides whether the
+    # credential check below happens at all. Each was compared only once it had
+    # been found uncompared — which is the argument for comparing the entry.
+    misses, wrong = [], []
+    for key, declared in sorted(prof_acts[action_id].items()):
+        if key == "id":
+            continue
+        expected = resolve(declared, misses)
+        if key not in act:
+            wrong.append("      %s: absent, but the profile declares %s"
+                         % (key, json.dumps(expected)))
+        elif act[key] != expected:
+            wrong.append("      %s: %s, but the profile declares %s"
+                         % (key, json.dumps(act[key]), json.dumps(expected)))
     if misses:
         stop("%r needs %s, which this run cannot supply — see §4"
              % (action_id, ", ".join("{%s}" % m for m in sorted(set(misses)))))
-    if expected != act["argv"]:
-        stop("%r is not this repo's action resolved from run state:\n      profile: %s\n"
-             "      approved: %s" % (action_id, json.dumps(expected), json.dumps(act["argv"])))
+    if wrong:
+        stop("%r is not this repo's action resolved from run state — the profile wins:\n%s"
+             % (action_id, "\n".join(wrong)))
 elif action_id not in LOCAL:
     stop("%r is in neither .clodex/profile.json nor %s — nothing outside those may run at ship"
          % (action_id, ", ".join(LOCAL)))
@@ -940,16 +978,21 @@ printf 'rc=%s\n' "$RC"
 - The block never composes a shell string. argv is a list, executed as a list, so
   a target containing a space or a quote cannot become two arguments.
 - A missing `env_refs` name stops the step before it acts. Names only, always.
-- **The profile is the authority on membership and policy, not the approval.**
-  The descriptors in §5 are typed by hand, and a `policy` mistyped as
-  `auto-with-authorization` would silently delete the `always-ask-exact` gate —
-  and the user would never notice, because the authorization message they read
-  carries the same wrong label. So the executor opens `.clodex/profile.json` and
-  refuses on any disagreement, refuses an id that is in neither the profile nor
-  ship's own three, and refuses outright if the profile cannot be read. This is
-  the mechanism behind the profile schema's *"Nothing outside this list may be run
-  at ship"*, and behind a repo marking its red-tier actions `always-ask-exact` and
-  expecting that to hold.
+- **The profile is the authority on the whole descriptor, not the approval.** The
+  descriptors in §5 are typed by hand, and every hand-copied field is a gate
+  somebody can delete by mistyping it: a `policy` written
+  `auto-with-authorization` removes the `always-ask-exact` ask, a wrong `cwd`
+  publishes the wrong package under the right argv, an emptied `env_refs` skips
+  the credential check entirely. None of it is caught by the human gate either,
+  because §5's message renders those same fields from the same wrong descriptor.
+  So for any action with a profile entry the executor compares **every field that
+  entry declares**, after placeholder resolution, and refuses on any absence,
+  emptying or disagreement — not a list of field names that has to be extended
+  each time one is found missing from it. It also refuses an id that is in
+  neither the profile nor ship's own three, and refuses outright if the profile
+  cannot be read. This is the mechanism behind the profile schema's *"Nothing
+  outside this list may be run at ship"*, and behind a repo marking its red-tier
+  actions `always-ask-exact` and expecting that to hold.
 - **Know what that authority is not.** `.clodex/profile.json` is working-tree
   state, not a hash the authorization pins: an edit to it between the
   authorization and the step changes what the executor compares against, and it
@@ -1091,6 +1134,11 @@ except (OSError, ValueError) as exc:
     raise SystemExit("RECONCILE: STOP — cannot read %s: %s" % (profile_path, exc))
 auth = [a for a in snap["approvals"]
         if a["scope"] == "release-authorization" and a["revoked"] is None]
+src = prof["version"]["source"]
+cl = (prof.get("changelog") or {}).get("path")
+if not src and not cl:
+    raise SystemExit("RECONCILE: done — this repo has no changelog and no version source, so "
+                     "there is nothing to write and no release commit to make (§4)")
 book = [x for a in auth for x in a["actions"] if x.get("id") == "bookkeeping"]
 if len(book) != 1:
     raise SystemExit("RECONCILE: STOP — expected one authorized bookkeeping descriptor, found %d"
@@ -1109,7 +1157,7 @@ def at_start(path):
 
 def version_in(text, where):
     field = prof["version"].get("field")
-    if text is None:
+    if not text:                        # absent, or created by this run: no value yet
         return None
     if not field:
         return text.strip()
@@ -1129,7 +1177,6 @@ def changed(now, was):
             if l[:1] in "+-" and not l.startswith(("+++", "---"))]
 
 verdicts = []
-src = prof["version"]["source"]
 if src:
     if not want_v:
         raise SystemExit("RECONCILE: STOP — the authorization records no version to check against")
@@ -1144,24 +1191,31 @@ if src:
                      "authorized" if got == want_v else
                      "pre-release" if got == before else "FOREIGN: %r" % (got,)))
 
-cl = (prof.get("changelog") or {}).get("path")
 if cl:
     if not want_c:
         raise SystemExit("RECONCILE: STOP — the authorization records no changelog text to check "
                          "against")
     now = open(cl).read() if os.path.exists(cl) else ""
     was = at_start(cl)
-    lines = changed(now, was)
-    want_lines = set(want_c.splitlines())
-    # A release adds a section. It never removes history, and it never adds a
-    # line that is not part of the text the user approved.
-    stray = [l for l in lines
-             if l.startswith("-") or (l[1:].strip() and l[1:] not in want_lines)]
-    print("changelog: holds the authorized section:", bool(want_c) and want_c in now)
+    # The whole test, and it is a containment one rather than a line-membership
+    # one: the file must be its pre-release self with the authorized text
+    # inserted ONCE. A per-line check against the set of authorized lines passes
+    # a duplicate of any of those lines dropped anywhere else in the file —
+    # `- did the thing` appended into last release's section reads as ship's own.
+    def norm(t):
+        return "\n".join(l.rstrip() for l in (t or "").splitlines() if l.strip())
+    residue = now.replace(want_c, "", 1) if want_c and want_c in now else now
+    inserted_once = bool(want_c) and want_c in now and norm(residue) == norm(was)
+    print("changelog: holds the authorized section: %s | and nothing else changed: %s"
+          % (bool(want_c) and want_c in now, inserted_once))
+    # Take the authorized text back out and diff what is left against the file as
+    # it was: that names the foreign edit itself, not the first three lines of a
+    # diff that is mostly ship's own work.
     verdicts.append(("changelog",
-                     "FOREIGN: " + " | ".join(stray[:3]) if stray else
-                     "authorized" if want_c in now else
-                     "pre-release" if now == was else "FOREIGN: not the authorized section"))
+                     "authorized" if inserted_once else
+                     "pre-release" if norm(now) == norm(was) else
+                     "FOREIGN: " + (" | ".join(changed(norm(residue), norm(was))[:3])
+                                    or "not the authorized text")))
 
 for name, v in verdicts:
     print("%-10s %s" % (name, v))
