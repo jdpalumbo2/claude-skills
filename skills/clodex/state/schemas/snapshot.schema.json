@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "clodex/snapshot.schema.json",
+  "title": "clodex run snapshot",
+  "description": "<run_dir>/run.json — the deterministic reduction over <run_dir>/events.ndjson. Derived state only: rebuild it from the events whenever it fails to load or validate.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run",
+    "parent",
+    "repo",
+    "branch",
+    "git",
+    "brief",
+    "lane",
+    "plan",
+    "stage",
+    "batches",
+    "findings",
+    "verification",
+    "release",
+    "approvals",
+    "last_seq"
+  ],
+  "properties": {
+    "schema_version": {"type": "integer"},
+    "run": {"type": ["string", "null"], "description": "Run id, e.g. r-2026-08-10-a."},
+    "parent": {"type": ["string", "null"], "description": "Parent run id for a resumed or split run."},
+    "repo": {"type": ["string", "null"], "description": "Absolute path to the repo the run operates on."},
+    "branch": {"type": ["string", "null"]},
+    "git": {
+      "type": "object",
+      "description": "Change boundary recorded at preflight.",
+      "required": ["start_head", "dirty_at_start"],
+      "properties": {
+        "start_head": {"type": ["string", "null"]},
+        "dirty_at_start": {
+          "type": "array",
+          "description": "Paths dirty before the run, acknowledged by the user.",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "brief": {"type": ["string", "null"], "description": "The ask, verbatim."},
+    "lane": {"type": ["string", "null"]},
+    "plan": {
+      "type": "object",
+      "required": ["version", "path", "hash", "amendments"],
+      "properties": {
+        "version": {"type": ["integer", "null"]},
+        "path": {"type": ["string", "null"]},
+        "hash": {"type": ["string", "null"], "description": "Content hash approvals bind to."},
+        "amendments": {
+          "type": "array",
+          "description": "Each amendment supersedes the plan hash and revokes approvals bound to it.",
+          "items": {
+            "type": "object",
+            "required": ["seq", "t", "from_hash", "to_hash", "version", "note", "required_review"],
+            "properties": {
+              "seq": {"type": "integer"},
+              "t": {"type": ["string", "null"]},
+              "from_hash": {"type": ["string", "null"]},
+              "to_hash": {"type": ["string", "null"]},
+              "version": {"type": ["integer", "null"]},
+              "note": {"type": ["string", "null"]},
+              "required_review": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        }
+      }
+    },
+    "stage": {
+      "type": ["string", "null"],
+      "description": "Monotonic: a run never re-enters an earlier stage.",
+      "enum": [null, "open", "plan", "build", "verify", "ship", "closed"]
+    },
+    "batches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "owned_paths", "commit", "delta_review"],
+        "properties": {
+          "id": {"type": ["integer", "string"]},
+          "owned_paths": {"type": "array", "items": {"type": "string"}},
+          "commit": {"type": ["string", "null"]},
+          "delta_review": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "source", "disposition"],
+        "properties": {
+          "id": {"type": ["integer", "string"]},
+          "source": {"type": ["string", "null"]},
+          "disposition": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "required": ["declared", "evidence", "debt"],
+      "properties": {
+        "declared": {"type": "array"},
+        "evidence": {"type": "array"},
+        "debt": {"type": "array", "description": "Deferred checks; accepted once, at release authorization."}
+      }
+    },
+    "release": {
+      "type": "object",
+      "required": ["state", "steps", "timestamp", "tag", "deployed", "verified_live"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "not-started",
+            "in-progress",
+            "push-failed",
+            "deploy-failed",
+            "not-deployed",
+            "verified-live",
+            "abandoned"
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "description": "Two-phase external side effects: at most one step is pending at a time.",
+          "items": {
+            "type": "object",
+            "required": ["step", "op_id", "status", "reconciled"],
+            "properties": {
+              "step": {"type": "string"},
+              "op_id": {"type": "string", "description": "Idempotency key for the external action."},
+              "status": {"type": "string", "enum": ["pending", "done", "failed"]},
+              "reconciled": {"type": "boolean", "description": "Checked against reality before any retry."}
+            }
+          }
+        },
+        "timestamp": {"type": ["string", "null"]},
+        "tag": {"type": ["string", "null"]},
+        "deployed": {"type": ["boolean", "string", "null"]},
+        "verified_live": {"type": ["boolean", "string", "null"]}
+      }
+    },
+    "approvals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["t", "scope", "by", "plan_version", "plan_hash", "actions", "accepted_debt"],
+        "properties": {
+          "t": {"type": ["string", "null"]},
+          "scope": {"type": "string"},
+          "by": {"type": "string"},
+          "plan_version": {"type": ["integer", "null"]},
+          "plan_hash": {"type": ["string", "null"], "description": "Must be a plan hash this run has recorded."},
+          "actions": {
+            "type": "array",
+            "description": "The exact external actions authorized.",
+            "items": {"type": "object"}
+          },
+          "accepted_debt": {"type": "array"}
+        }
+      }
+    },
+    "last_seq": {"type": "integer", "description": "Sequence number of the last event folded into this snapshot."}
+  }
+}

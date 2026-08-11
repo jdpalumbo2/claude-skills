@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "clodex/event.schema.json",
+  "title": "clodex run event",
+  "description": "One line of <run_dir>/events.ndjson. Events are authoritative; the run snapshot is a derived reduction over them. schema_version, seq and t are stamped by append_event; every other field is event-type specific payload.",
+  "type": "object",
+  "required": ["schema_version", "seq", "t", "e"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "description": "Event contract version. 1 for clodex v0.1."
+    },
+    "seq": {
+      "type": "integer",
+      "description": "Monotonic sequence number, assigned at append time from the last valid line."
+    },
+    "t": {
+      "type": "string",
+      "description": "ISO-8601 UTC timestamp, stamped at append time. The reducer never reads the wall clock, so all snapshot timestamps come from here."
+    },
+    "e": {
+      "type": "string",
+      "description": "Event type. The reducer rejects anything outside this vocabulary.",
+      "enum": [
+        "run:opened",
+        "run:closed",
+        "stage:plan:entered",
+        "stage:build:entered",
+        "stage:verify:entered",
+        "stage:ship:entered",
+        "plan:recorded",
+        "plan:amended",
+        "plan:approved",
+        "approval:granted",
+        "batch:opened",
+        "batch:committed",
+        "batch:reviewed",
+        "finding:recorded",
+        "finding:disposed",
+        "verification:declared",
+        "verification:evidence",
+        "verification:debt",
+        "release:step:pending",
+        "release:step:done",
+        "release:step:failed",
+        "release:step:reconciled",
+        "release:updated"
+      ]
+    }
+  }
+}
