@@ -31,7 +31,13 @@ CLODEX_HOME="${CLODEX_HOME:-$HOME/.claude/skills/clodex}"  # the dir holding thi
 STATE="$CLODEX_HOME/state/clodex_state.py"
 REPO="$(git rev-parse --show-toplevel)"
 cd "$REPO"    # do this, do not just assume it
+REMOTE="$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null | cut -d/ -f1 || true)"
+[ -n "$REMOTE" ] || REMOTE="$(git remote | head -1)"   # empty = this repo has no remote
 ```
+
+Shell variables do not survive between separate command invocations, so
+**re-establish this block at the top of any shell you run these procedures in**.
+Later sections use `$REPO`, `$STATE`, and `$REMOTE` as if it were already there.
 
 **Every command below runs from `$REPO`.** `git check-ignore`, the repo
 inspection in §3, and `git add` all resolve relative paths against the current
@@ -62,8 +68,10 @@ python3 "$STATE" unlock  "$RUN_DIR"          # dead holder only; refuses a live 
 ```
 
 `append` exit codes: `0` written · `1` refused, nothing written, safe to retry ·
-`2` usage · `3` the event is durably logged but `run.json` is stale — **do not
-retry**, run `rebuild` to see true state.
+`2` usage · `3` the event is durably logged but `run.json` is stale. On `3` the
+event **counts** — it is in the log and the reducer applies it — so **do not
+retry** (that would double-write). Run `rebuild` to refresh the snapshot and
+carry on from the event you just appended.
 
 ---
 
@@ -73,6 +81,11 @@ Run every check. A failed check stops here; do not "proceed and see." Preflight
 results are reported in chat, not logged as events — the durable part is
 recorded in `run:opened` (§6).
 
+**When a check fails**, the invocation does not end: name the check, say exactly
+what would fix it, and wait for the user. When they say it is fixed, **resume
+from that check** — re-run it and continue down the list. Do not silently re-run
+the checks that already passed, and do not skip the ones after it.
+
 **Order on a first run:** checks 4 and 6 read the profile, which does not exist
 yet. Do checks 1–3 and 5, run the interview (§3), then come back and finish 4
 and 6. A first run also has no `.clodex/` directory, so §2 finds nothing and
@@ -81,19 +94,21 @@ costs one `ls`.
 1. **Repo root.** `git rev-parse --show-toplevel`. Not inside a work tree → stop
    and ask where the work lives. Also note the branch: `git rev-parse
    --abbrev-ref HEAD`.
-2. **Remote state.** Resolve the remote's *name* first — it is not always
-   `origin`, and halting a workflow over a hardcoded name is a self-inflicted
-   outage:
+2. **Remote state.** `$REMOTE` comes from the preamble — the remote is not
+   always named `origin`, and halting a workflow over a hardcoded name is a
+   self-inflicted outage:
    ```bash
-   REMOTE="$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null | cut -d/ -f1)"
-   [ -n "$REMOTE" ] || REMOTE="$(git remote | head -1)"
-   [ -n "$REMOTE" ] && git ls-remote --exit-code "$REMOTE" HEAD >/dev/null
+   if [ -n "$REMOTE" ]; then
+     git ls-remote --exit-code "$REMOTE" HEAD >/dev/null
+   else
+     echo "no remote configured"
+   fi
    git status -sb | head -1                       # ahead/behind
    ```
    `ls-remote` proves the remote is reachable *and* that credentials work.
    Report divergence now — a repo behind its remote gets resolved before
-   planning, never at ship. An empty `$REMOTE` means the repo has no remote at
-   all: that is fine, but say so, because ship will have no push step.
+   planning, never at ship. "No remote configured" is a **pass**, not a failure:
+   say so out loud, because ship will have no push step.
 3. **`.clodex/` ignore rule.** Run state must never be committed; the profile
    must be:
    ```bash
@@ -202,7 +217,13 @@ print("profile ok")
 PY
 ```
 
-That checks types, required fields, and enums. It does **not** check
+On success that prints `profile ok` and exits 0. On failure it exits 1 with a
+traceback whose **last line names the offending path** — e.g.
+`ClodexStateError: $.actions[0].policy: 'auto' is not an allowed value`. Report
+that path and message to the user verbatim; it is the fastest fix instruction
+there is.
+
+It checks types, required fields, and enums. It does **not** check
 `additionalProperties`, `pattern`, or `minItems` — so an unknown key, a
 malformed action id, and an action with an empty `argv` all survive it. Read the
 file yourself as well.
@@ -222,7 +243,7 @@ Non-destructive: never regenerate the file wholesale, never drop `notes`.
    ls .github/workflows docs 2>/dev/null
    cat .nvmrc .tool-versions .python-version 2>/dev/null   # pinned runtimes
    git tag --sort=-v:refname | head -5
-   git symbolic-ref --short "refs/remotes/$REMOTE/HEAD" 2>/dev/null
+   git symbolic-ref --short "refs/remotes/${REMOTE:-origin}/HEAD" 2>/dev/null
    ```
    **Fill in `runtimes` and `commands.install` here** — preflight check 4 loops
    over `runtimes`, so a profile without it makes that check a permanent no-op.
@@ -237,12 +258,26 @@ Non-destructive: never regenerate the file wholesale, never drop `notes`.
    classes; which release actions clodex may take; the **names** of required env
    vars.
 
-   **Evidence classes** are the four kinds of proof a plan can require, and the
-   profile's `evidence.default_classes` is which of them this repo expects by
-   default: `tests` (automated suites), `real-data` (run against
-   production-shaped input), `live-check` (the deployed thing observed working),
-   `visual` (rendered output reviewed). Ask in those terms; `clodex-plan` owns
-   the per-plan detail.
+   What those terms mean, so you can answer "what are my options?":
+   - **Version source** — the file that holds the authoritative version, and the
+     key inside it. Typically `package.json` → `version`, or `pyproject.toml` →
+     `project.version`, or a bare `VERSION` file. `null` if the repo is
+     unversioned.
+   - **Branch rule** — whether a run may commit straight to the default branch
+     (`main`, `work_on_default: true`) or must work on its own branch
+     (`work_on_default: false` plus a naming pattern like `feature/<slug>` or
+     `clodex/<run-id>`).
+   - **Tag format** — the pattern a release tag follows, e.g. `v{version}`
+     producing `v1.4.0`; or tagging off entirely (`enabled: false`).
+   - **Deploy target** — where a release actually lands and how it gets there:
+     a host and project auto-deploying on push to the default branch, a manual
+     command listed in `actions`, something external, or nothing at all
+     (`deploy: null` — ship then closes at an explicit not-deployed boundary).
+   - **Evidence classes** — the four kinds of proof a plan can require;
+     `evidence.default_classes` is which of them this repo expects by default:
+     `tests` (automated suites), `real-data` (run against production-shaped
+     input), `live-check` (the deployed thing observed working), `visual`
+     (rendered output reviewed). `clodex-plan` owns the per-plan detail.
 3. **Action policy is structured, per action.** Every entry in `actions` carries
    a literal `argv` and a `policy`:
    - `auto-with-authorization` — may run once it is covered by the single
@@ -266,8 +301,13 @@ Non-destructive: never regenerate the file wholesale, never drop `notes`.
     "env_refs": [],
     "policy": "auto-with-authorization"}
    ```
-   The same repo would mark a production deploy `always-ask-exact`, so its
-   literal filled argv is shown for approval on every release.
+   The remaining three fields: `cwd` is the repo-relative directory the command
+   runs in, `null` meaning the repo root; `target` names what the action affects
+   in plain words, so a user approving it can see the blast radius without
+   parsing argv; `env_refs` lists the **names** of credentials the action needs,
+   never values, and `[]` when it needs none. The same repo would mark a
+   production deploy `always-ask-exact`, so its literal filled argv is shown for
+   approval on every release.
 4. **Write, validate, commit.** Write every required key — the schema requires
    `runtimes` and `required_env` (use `[]` for "none", never omit them) and every
    key of `commands` including `install`, precisely so preflight checks 4 and 6
@@ -394,14 +434,21 @@ for L in a b c d e f g h; do
   [ -e "$REPO/.clodex/r-$DATE-$L" ] && continue
   RUN_ID="r-$DATE-$L"; break                  # first free letter for today
 done
-[ -n "$RUN_ID" ] || echo "no free run id for $DATE"
-RUN_DIR="$REPO/.clodex/$RUN_ID"
-mkdir -p "$RUN_DIR"
+if [ -z "$RUN_ID" ]; then
+  RUN_DIR=""
+  echo "no free run id for $DATE — stop, do not open a run"
+else
+  RUN_DIR="$REPO/.clodex/$RUN_ID"
+  mkdir -p "$RUN_DIR"
+fi
 ```
 
-An empty `$RUN_ID` means all eight letters are taken: **stop and tell the user**
-— eight runs in one day means something is wrong, and appending into an existing
-run directory would corrupt someone else's history.
+The guard is inside the block on purpose. An unguarded empty `$RUN_ID` makes
+`$REPO/.clodex/$RUN_ID` expand to `$REPO/.clodex/` itself, and the append then
+writes `events.ndjson` and `run.json` **beside `profile.json`**, where §2's
+`ls -1d "$REPO"/.clodex/r-*/` will never find them. If you see that message,
+**stop and tell the user**: eight runs in one day means something is wrong, and
+appending into an existing run directory would corrupt someone else's history.
 
 Write the event to `$RUN_DIR/run-opened.json` with your file-writing tool, not
 shell interpolation — the brief is verbatim user text and will contain quotes:
