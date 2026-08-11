@@ -155,9 +155,18 @@ session that died after appending left the fact in the log where you can see it.
 
 ## 2. What this stage owns, and what it must never touch
 
-**Two files.** The bookkeeping step writes the profile's `changelog.path` and its
-`version.source`, and the release commit stages exactly those two paths. That is
-the whole of what ship writes.
+**The changelog and the version source, and nothing else.** The bookkeeping step
+writes the profile's `changelog.path` and its `version.source`, and the release
+commit stages exactly those paths. That is the whole of what ship writes.
+
+Usually two files. `changelog.path` may also be **the directory releases are
+written into** (profile.schema.json says so, and `changelog.style` is where a
+repo records a convention like *one file per release plus a rollup row*). Then
+the release writes more than one changelog file, and their names come from the
+convention rather than from the profile — so the **authorization names them**:
+`changelog` becomes an object mapping each path to its exact text, and the
+bookkeeping descriptor's `writes` is that list plus the version source (§5).
+Everything downstream reads that one list.
 
 ```bash
 python3 - "$PROFILE" <<'PY'
@@ -463,7 +472,11 @@ elif dep["trigger"] == "auto-on-push":
 elif dep["trigger"] == "manual-command":
     step("deploy", "%s — needs an action id from the list below" % dep["target"])
 else:
-    step("deploy", "%s, trigger external — someone outside clodex deploys: not-deployed" % dep["target"])
+    # NOT a step. §5 and §10 both derive the step list as auto-on-push or
+    # manual-command only, so counting it here made three derivations into two
+    # answers: a deploy descriptor §5 never checked but §6 would have run.
+    print("  (deploy.trigger external — someone outside clodex deploys %s: not-deployed)"
+          % dep["target"])
 if dep and dep["verify_live"]:
     step("verify-live", "; ".join("%s: %s" % (c["name"], c["check"]) for c in dep["verify_live"]))
 elif dep is not None:
@@ -623,6 +636,13 @@ Rules that make this message the gate rather than a summary of one:
   transcript; §7.2's compare holds the files on disk to them, and `{version}` and
   `{tag}` in any profile argv are resolved from them. `env_refs` are names; a
   value never appears in this message, in a log, or in an event.
+- **`changelog` is a string when `changelog.path` is a file, and an object when
+  it is a directory** — `{"<path>": "<the exact text of that file>"}`, one entry
+  per file this release writes there. `writes` must equal those paths plus the
+  version source, and the release commit's pathspec must be the same list; §5
+  refuses all three ways of disagreeing. This is the only place the file names
+  exist, because a one-file-per-release convention names them from the version
+  and the profile cannot know them in advance.
 - **Every descriptor carries its `step`**, one of §6's six names. That is what
   lets §10 check that each authorized action actually ran — an authorization for a
   push, with no `done` push step and no reason saying why, is the "tagged but
@@ -748,7 +768,7 @@ back. This is the last moment where "no" costs nothing:
 ```bash
 python3 - "$STATE" "$RUN_DIR" "$PROFILE" "$CLODEX_HOME/profile.schema.json" \
         "$RUN_DIR/authorization.json" <<'PY'
-import json, subprocess, sys
+import json, os, subprocess, sys
 state, run_dir, profile_path, schema_path, payload_path = sys.argv[1:6]
 STEPS = ("bookkeeping", "commit", "tag", "push", "deploy", "verify-live")
 LOCAL = ("bookkeeping", "release-commit", "release-tag")
@@ -827,6 +847,25 @@ print("steps this repo's release has:", ", ".join(STEP_LIST) or "(none)")
 print("of which need a descriptor:", ", ".join(NEEDS_DESCRIPTOR) or "(none)")
 
 book = [x for x in payload.get("actions", []) if x.get("id") == "bookkeeping"]
+
+def changelog_targets(entry):
+    """{path: the authorized text for it} — the release's changelog files.
+
+    `changelog.path` is a file OR "the directory releases are written into"
+    (profile.schema.json), and a one-file-per-release repo writes two: the new
+    release note and a rollup. So `changelog` is a string for the file case and
+    a {path: text} object for the directory case, and everything downstream —
+    the pathspec, §7.1's writes, §7.2's compare — reads this one derivation.
+    """
+    want = (entry or {}).get("changelog")
+    if isinstance(want, dict):
+        return want
+    return {cl: want} if cl else {}
+
+CL_FILES = changelog_targets(book[0] if book else None)
+RELEASE_FILES = sorted([p for p in list(CL_FILES) + [src] if p])
+print("files this release writes:", ", ".join(RELEASE_FILES) or "(none)")
+
 values = {"version": (book[0].get("version") if book else None) or "",
           "tag": (book[0].get("tag") if book else None) or "",
           "branch": subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -855,7 +894,7 @@ def forbidden_shape(argv, tag):
             # A pathspec is only a safety mechanism if it names the release files.
             # `-- .` is a pathspec, and it takes the whole working tree.
             given = argv[argv.index("--") + 1:]
-            want = [p for p in (cl, src) if p]
+            want = RELEASE_FILES
             if sorted(given) != sorted(want):
                 problems.append("%s: the pathspec is %s but the release writes %s — a pathspec "
                                 "commit takes the working tree, so anything else in it lands "
@@ -996,6 +1035,30 @@ else:
         if not book[0].get(need):
             problems.append("bookkeeping: %s is required — §7.2 compares the files on disk against "
                             "it before anything is staged" % need)
+    # A directory changelog writes files whose names the profile does not know,
+    # so the authorization is the only place they can be named. A bare string
+    # would leave §7.2 comparing against the directory itself.
+    if cl and os.path.isdir(os.path.join(snap["repo"], cl)):
+        if not isinstance(book[0].get("changelog"), dict):
+            problems.append("bookkeeping: %s is a directory, so changelog must be an object "
+                            "mapping each file this release writes to its exact text, not one "
+                            "string (§7.1)" % cl)
+        else:
+            for path in book[0]["changelog"]:
+                if os.path.normpath(path) == os.path.normpath(cl) or not (
+                        os.path.normpath(path).startswith(os.path.normpath(cl) + os.sep)):
+                    problems.append("bookkeeping: changelog names %r, which is not inside the "
+                                    "profile's changelog directory %r" % (path, cl))
+                if not str(book[0]["changelog"][path] or "").strip():
+                    problems.append("bookkeeping: changelog entry %r has no text" % path)
+    elif cl and isinstance(book[0].get("changelog"), dict):
+        problems.append("bookkeeping: %s is a single file, so changelog is the text inserted "
+                        "into it, not an object" % cl)
+    writes = sorted(book[0].get("writes") or [])
+    if writes != RELEASE_FILES:
+        problems.append("bookkeeping: writes is %s but this release writes %s — §7.2 stages that "
+                        "list and the commit pathspec is built from it"
+                        % (json.dumps(writes), json.dumps(RELEASE_FILES)))
     if prof["tag"]["enabled"] and not book[0].get("tag"):
         problems.append("bookkeeping: tag is required — this repo tags releases (%s), and {tag} in "
                         "any profile argv is resolved from it" % prof["tag"]["format"])
@@ -1342,7 +1405,7 @@ that is neither. The guard below is not skipped on a resume so much as replaced
 by a stricter one:
 
 ```bash
-git status --porcelain --untracked-files=all -- <changelog path> <version source>
+git status --porcelain --untracked-files=all -- <release files>
 ```
 
 Anything printed is a change ship did not make, and writing over it would put a
@@ -1518,32 +1581,42 @@ if src:
                              "FOREIGN: " + (" | ".join(changed(now, expected)[:4]) or "not the "
                                             "authorized edit")))
 
-if cl:
-    if not want_c:
+# `changelog.path` may be the directory releases are written into, in which case
+# the authorization names the files it writes — a release note, a rollup — and
+# carries the text of each. One derivation, the same one §5 validates against.
+cl_files = want_c if isinstance(want_c, dict) else ({cl: want_c} if cl else {})
+
+for path, want_text in sorted(cl_files.items()):
+    if not want_text:
         raise SystemExit("RECONCILE: STOP — the authorization records no changelog text to check "
-                         "against")
-    now = open(cl).read() if os.path.exists(cl) else ""
-    was = at_start(cl) or ""
+                         "against for %s" % path)
+    # isfile, not exists: a directory here would raise IsADirectoryError, which
+    # is what a directory-style changelog.path used to do before the files were
+    # named individually.
+    now = open(path).read() if os.path.isfile(path) else ""
+    was = at_start(path) or ""
     # The whole test, and it is a containment one rather than a line-membership
     # one: the file must be its pre-release self with the authorized text
     # inserted ONCE. A per-line check against the set of authorized lines passes
     # a duplicate of any of those lines dropped anywhere else in the file —
     # `- did the thing` appended into last release's section reads as ship's own.
-    residue = now.replace(want_c, "", 1) if want_c and want_c in now else now
-    inserted_once = bool(want_c) and want_c in now and norm(residue) == norm(was)
-    print("changelog: holds the authorized section: %s | and nothing else changed: %s"
-          % (bool(want_c) and want_c in now, inserted_once))
+    # A file this release creates has was == "", so containment reduces to "the
+    # file is exactly the authorized text", which is the right test for it.
+    residue = now.replace(want_text, "", 1) if want_text in now else now
+    inserted_once = want_text in now and norm(residue) == norm(was)
+    print("changelog %s: holds the authorized text: %s | and nothing else changed: %s"
+          % (path, want_text in now, inserted_once))
     # Take the authorized text back out and diff what is left against the file as
     # it was: that names the foreign edit itself, not the first three lines of a
     # diff that is mostly ship's own work.
-    verdicts.append(("changelog",
+    verdicts.append(("changelog %s" % path,
                      "authorized" if inserted_once else
                      "pre-release" if norm(now) == norm(was) else
                      "FOREIGN: " + (" | ".join(changed(norm(residue), norm(was))[:3])
                                     or "not the authorized text")))
 
 for name, v in verdicts:
-    print("%-10s %s" % (name, v))
+    print("%-44s %s" % (name, v))
 states = [v for _, v in verdicts]
 if any(v.startswith("FOREIGN") for v in states):
     print("RECONCILE: STOP — a release file holds something nobody authorized. Somebody edited it "
@@ -1552,7 +1625,8 @@ elif not states:
     print("RECONCILE: done — this repo has no changelog and no version source, so there is "
           "nothing for a release commit to contain (§7.3)")
 elif all(v == "authorized" for v in states):
-    print("RECONCILE: done — both files hold exactly what was authorized, and nothing else")
+    print("RECONCILE: done — all %d release files hold exactly what was authorized, and nothing "
+          "else" % len(states))
 else:
     print("RECONCILE: failed — ship's own work is missing or half-written; go back to §7.1")
 PY
@@ -1562,12 +1636,18 @@ PY
 to §7.1 to finish the writing; `STOP` goes to the user, and nothing is staged,
 overwritten, or committed until they have dealt with it.
 
+`<release files>` below is the `writes` list from the bookkeeping descriptor —
+the version source plus every changelog file, which is one file in a repo whose
+`changelog.path` is a file and several in one where it is a directory. It is the
+same list §5 validated and the same list the authorized commit argv names, so
+the three cannot disagree.
+
 ```bash
-git add -- <changelog path> <version source>
-git status --short                       # anything staged that is not one of those two is the
+git add -- <release files>
+git status --short                       # anything staged that is not one of those is the
                                          # user's: leave it staged, and never widen the pathspec
-git diff --cached -- <changelog path> <version source>        # read it, this is the release commit
-if git diff --quiet -- <changelog path> <version source>; then
+git diff --cached -- <release files>     # read it, this is the release commit
+if git diff --quiet -- <release files>; then
     echo "GUARD OK — now run the release-commit action through §6, then read it back:"
     echo "  git show --stat --oneline HEAD      # exactly those files, nothing else"
 else
@@ -1849,8 +1929,30 @@ repo's release has**, so cutting the deploy cuts the live check with it and both
 names belong in the list. A step you do not name is a step §10 says never
 completed. It used to accept the step name appearing
 anywhere in the prose, which let *"the push-button deploy dashboard was green"*
-account for a `push` that never happened — a sentence, not a declaration. Then
-close (§10).
+account for a `push` that never happened — a sentence, not a declaration.
+
+**The reason after the `|` is required, and §10 refuses a list without one.** A
+bare `skipped: deploy, verify-live |` is a step count, not an account: it names
+what did not happen and says nothing about why, which is the one thing the
+manifest is being asked for. Refusing it means every unnamed step blocks, which
+is the right way round.
+
+**`skipped:` is not the other half of `cut`, and §10 does not cross-check them.**
+They answer different questions at different gates:
+
+| | Asked at | About | Vocabulary |
+|---|---|---|---|
+| `cut` | §5, in the authorization payload | a step that needs a descriptor and is not getting one | never authorized |
+| `skipped:` | §10, in `deployed` | a step this release has that did not complete | did not run — *whether or not* it was cut |
+
+So a step cut at §5 is also declared skipped here — that is not a contradiction,
+it is the same step failing two different tests, and §10 derives its list from
+the profile rather than from the descriptors precisely so that a cut step still
+has to be accounted for. And **`verify-live` can be skipped but never cut**,
+because cutting is about descriptors and reads do not get one (§5). Its absence
+is declared here, in this list, and nowhere else.
+
+Then close (§10).
 
 A resumable state closes nothing. Leave the run open, tell the user the one line
 that resumes it — *"invoke `clodex` in this repo; it will offer to resume run
@@ -1940,7 +2042,14 @@ done_steps = {s["step"] for s in rel["steps"] if s["status"] == "done"}
 # "skipped: <step>, <step> | <why>". Substring-matching a sentence let
 # "the push-button deploy dashboard was green" account for a push that never ran.
 dep = rel.get("deployed")
-m = re.match(r"^skipped:\s*([^|]*)\|", dep) if isinstance(dep, str) else None
+m = re.match(r"^skipped:\s*([^|]*)\|(.*)$", dep, re.S) if isinstance(dep, str) else None
+# The reason is the declaration. Without it the list names what did not happen
+# and says nothing about why, which is the one thing it is being asked for —
+# so a reason-free list buys no steps and every one of them blocks below.
+if m and not m.group(2).strip():
+    blockers.append("`deployed` declares steps skipped but gives no reason after the `|`: "
+                    "say  skipped: %s | <why>  (§9)" % m.group(1).strip())
+    m = None
 skipped = {s.strip() for s in m.group(1).split(",")} & set(STEPS) if m else set()
 print("steps this release has:", authorized or "(none)", "| done:",
       sorted(done_steps) or "(none)", "| declared skipped:", sorted(skipped) or "(none)")
@@ -1968,6 +2077,13 @@ if rel["state"] in TERMINAL:
             blockers.append("step %r is part of this repo's release and never completed, and "
                             "`deployed` does not declare it skipped — say  skipped: %s | <why>  "
                             "there" % (st, st))
+    # Every step declared skipped, none done: nothing shipped. `not-deployed`
+    # means the release exists and did not go live; it does not mean there was
+    # no release. A run that did nothing has an honest ending and it is
+    # `abandoned` (§9) — SHIP COMPLETE here would be a green light on a no-op.
+    if rel["state"] != "abandoned" and authorized and not done_steps:
+        blockers.append("no step of this release completed, so nothing shipped — a run where "
+                        "nothing ran is `abandoned` (§9), not %r" % rel["state"])
 elif rel["state"] in RESUMABLE:
     if snap["stage"] == "closed":
         blockers.append("state %r is resumable but the run was closed" % rel["state"])
