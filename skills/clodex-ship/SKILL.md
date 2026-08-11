@@ -655,14 +655,27 @@ exactly as shown and the debt items copied verbatim from `verification.debt`:
 - **`verify-live` gets no descriptor.** Its checks are reads (§2), so they are not
   actions and `<N>` does not count them. The message lists them so the user knows
   what will be run against the live system; the authorized set is the descriptors.
-- **A profile-backed descriptor is that profile entry, resolved — every field of
-  it.** `argv`, `cwd`, `env_refs`, `target`, `policy`: whatever
-  `.clodex/profile.json` declares for that id is what the descriptor says, with
-  `{version}` / `{tag}` / `{branch}` / `{run}` filled in. You are transcribing,
-  not composing, and the validator below compares the **whole entry** rather than
-  a list of fields somebody remembered to check.
+- **A profile-backed descriptor is that profile entry, resolved — every field the
+  profile _schema_ defines.** `argv`, `cwd`, `env_refs`, `target`, `policy`:
+  whatever `.clodex/profile.json` declares for that id is what the descriptor
+  says, with `{version}` / `{tag}` / `{branch}` / `{run}` filled in. You are
+  transcribing, not composing.
+- **A field the profile omits is not a free field.** `cwd`, `target` and
+  `env_refs` are all optional in `profile.schema.json`, so a perfectly legal entry
+  can leave one out — and an omitted one means the schema's **empty value** for
+  that type (`cwd` and `target` null, `env_refs` `[]`), never "whatever the
+  descriptor likes". The validator reads the field set out of the schema and
+  derives the empty value from the declared type, so `cwd: "packages/b"` against
+  an entry with no `cwd` is refused exactly as it is against one that wrote
+  `"cwd": null`. Whether a human happened to type the key is not a security
+  boundary — and a field added to the schema next year is compared the day it is
+  added, without this document changing.
 - The three local steps carry the ids `bookkeeping`, `release-commit`,
-  `release-tag` and have no profile entry, so their fields are yours to write.
+  `release-tag` and have no profile entry, so their fields are yours to write —
+  which is why the validator checks their **shape** instead: all seven fields
+  present, `policy: "auto-with-authorization"`, `cwd` null, `env_refs` `[]`, and
+  an argv that is not one of the shapes §2 forbids by name (a `git commit` with
+  no `--` pathspec, `-a`, `git add -A`, a `-f`/`--force`/`--delete` on a ref).
   `bookkeeping` runs no command: its `argv` is `null` and its `writes` list the
   files instead.
 - **A repo with no changelog and no version source writes nothing**, so it gets
@@ -687,18 +700,51 @@ fails halfway has already committed, tagged and pushed, and those do not come
 back. This is the last moment where "no" costs nothing:
 
 ```bash
-python3 - "$STATE" "$RUN_DIR" "$PROFILE" "$RUN_DIR/authorization.json" <<'PY'
+python3 - "$STATE" "$RUN_DIR" "$PROFILE" "$CLODEX_HOME/profile.schema.json" \
+        "$RUN_DIR/authorization.json" <<'PY'
 import json, subprocess, sys
-state, run_dir, profile_path, payload_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+state, run_dir, profile_path, schema_path, payload_path = sys.argv[1:6]
 STEPS = ("bookkeeping", "commit", "tag", "push", "deploy", "verify-live")
 LOCAL = ("bookkeeping", "release-commit", "release-tag")
 TOKENS = ("version", "tag", "branch", "run", "commit")     # the whole placeholder vocabulary
+
+def die(message):
+    raise SystemExit("DO NOT APPEND — " + message)
+
 snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
 try:
     prof = json.load(open(profile_path))
 except (OSError, ValueError) as exc:
-    raise SystemExit("DO NOT APPEND — cannot read %s: %s" % (profile_path, exc))
+    die("cannot read %s: %s" % (profile_path, exc))
+try:
+    ACTION = json.load(open(schema_path))["properties"]["actions"]["items"]
+except (OSError, ValueError, KeyError) as exc:
+    die("cannot read the action field set from %s: %s" % (schema_path, exc))
 payload, problems = json.load(open(payload_path)), []
+
+# The field set comes from the SCHEMA, not from the keys this profile happened to
+# write. `cwd`, `target` and `env_refs` are all optional there, so a schema-legal
+# entry can omit one — and an omitted field must mean the schema's empty value,
+# never "nothing to compare". Deriving the empty value from the declared type is
+# what makes this cover the next optional field somebody adds to the schema.
+REQUIRED = set(ACTION.get("required", []))
+FIELDSET = {}
+for key, spec in ACTION["properties"].items():
+    if key == "id":
+        continue
+    types = spec.get("type")
+    types = [types] if isinstance(types, str) else list(types or [])
+    if key in REQUIRED:
+        FIELDSET[key] = ("required", None)
+    elif "null" in types:
+        FIELDSET[key] = ("omitted-means", None)
+    elif "array" in types:
+        FIELDSET[key] = ("omitted-means", [])
+    elif "object" in types:
+        FIELDSET[key] = ("omitted-means", {})
+    else:
+        FIELDSET[key] = ("no-empty-value", None)
+print("action fields the schema defines:", ", ".join(sorted(FIELDSET)))
 
 book = [x for x in payload.get("actions", []) if x.get("id") == "bookkeeping"]
 values = {"version": (book[0].get("version") if book else None) or "",
@@ -719,26 +765,53 @@ def resolve(value, misses):
         return [resolve(v, misses) for v in value]
     return value
 
+def forbidden_shape(argv, tag):
+    """§2's Never table, as a predicate over an argv ship wrote itself."""
+    if argv[:2] == ["git", "commit"]:
+        if "--" not in argv:
+            problems.append("%s: `git commit` with no `--` pathspec commits the WHOLE index, "
+                            "including work the user staged before the run (§2, §7.2)" % tag)
+        if [a for a in argv if a in ("-a", "--all", "-am", "-a m")]:
+            problems.append("%s: `git commit -a` stages every tracked file (§2)" % tag)
+    if argv[:2] == ["git", "add"] and [a for a in argv if a in ("-A", "--all", ".")]:
+        problems.append("%s: `git add -A` / `git add .` sweeps the tree (§2)" % tag)
+    if argv[:2] in (["git", "tag"], ["git", "push"], ["git", "branch"]):
+        bad = [a for a in argv
+               if a in ("-f", "--force", "--force-with-lease", "-d", "-D", "--delete")]
+        if bad:
+            problems.append("%s: `%s` rewrites or deletes a published ref — a human-owned "
+                            "decision that is not in any authorization this skill writes (§2)"
+                            % (tag, bad[0]))
+
 prof_acts = dict((a["id"], a) for a in prof["actions"])
 for act in payload.get("actions", []):
     tag = act.get("id") or "<descriptor with no id>"
     if act.get("step") not in STEPS:
         problems.append("%s: step %r is not one of %s" % (tag, act.get("step"), ", ".join(STEPS)))
     if act.get("id") in prof_acts:
-        # The WHOLE profile entry, field by field, with no allowlist: a field the
-        # profile declares and the descriptor omits, empties, or contradicts is a
-        # refusal. `policy`, then `step`, then `cwd` and `env_refs` were each
-        # found uncompared in turn; comparing the entry is what ends that.
-        misses = []
-        for key, declared in sorted(prof_acts[act["id"]].items()):
-            if key == "id":
+        # Every field the SCHEMA defines, against the profile's value or the
+        # schema's empty value. `policy`, `step`, `cwd`, `env_refs` were each
+        # found uncompared in turn; keying on the schema is what ends that.
+        entry, misses = prof_acts[act["id"]], []
+        for key in sorted(FIELDSET):
+            kind, empty = FIELDSET[key]
+            if key in entry:
+                expected = resolve(entry[key], misses)
+            elif kind == "required":
+                problems.append("%s: its profile entry is missing the required field %s — fix "
+                                ".clodex/profile.json first" % (tag, key))
                 continue
-            expected = resolve(declared, misses)
+            elif kind == "no-empty-value":
+                problems.append("%s: the schema defines %s with no empty value and this profile "
+                                "omits it, so ship cannot tell what it should be" % (tag, key))
+                continue
+            else:
+                expected = empty
             if key not in act:
-                problems.append("%s: the profile declares %s = %s and the descriptor has no %s"
+                problems.append("%s: the profile's %s is %s and the descriptor has no %s"
                                 % (tag, key, json.dumps(expected), key))
             elif act[key] != expected:
-                problems.append("%s: %s is %s but the profile declares %s — the profile wins"
+                problems.append("%s: %s is %s but the profile's is %s — the profile wins"
                                 % (tag, key, json.dumps(act[key]), json.dumps(expected)))
         for m in sorted(set(misses)):
             problems.append("%s: its profile entry needs {%s}, which this run cannot supply. %s"
@@ -747,18 +820,56 @@ for act in payload.get("actions", []):
                                "there is no second authorization to fill it in later (§4)."
                                if m == "commit" else
                                "The bookkeeping descriptor records no %s." % m))
-    elif act.get("id") not in LOCAL:
-        problems.append("%s: in neither .clodex/profile.json nor %s — a new action is added to the "
-                        "profile and committed first" % (tag, ", ".join(LOCAL)))
+    elif act.get("id") in LOCAL:
+        # These three have no profile entry to be compared against, so their
+        # shape is the only structural check they will ever get.
+        for f in ("id", "step", "argv", "cwd", "target", "env_refs", "policy"):
+            if f not in act:
+                problems.append("%s: no %r — a local descriptor carries id, step, argv, cwd, "
+                                "target, env_refs and policy" % (tag, f))
+        if act.get("policy") != "auto-with-authorization":
+            problems.append("%s: policy is %s — ship's own steps are exactly what this message "
+                            "grants, so they are auto-with-authorization"
+                            % (tag, json.dumps(act.get("policy"))))
+        if act.get("cwd") is not None:
+            problems.append("%s: cwd is %s — ship's own commands run at the repo root"
+                            % (tag, json.dumps(act.get("cwd"))))
+        if act.get("env_refs"):
+            problems.append("%s: env_refs is %s — ship's own commands need no credentials"
+                            % (tag, json.dumps(act.get("env_refs"))))
+        argv = act.get("argv")
+        if act.get("id") == "bookkeeping":
+            if argv is not None:
+                problems.append("bookkeeping: argv is %s — it runs no command, so argv is null "
+                                "and `writes` lists the files" % json.dumps(argv))
+        elif not isinstance(argv, list) or not argv or not all(isinstance(w, str) for w in argv):
+            problems.append("%s: argv is %s — a list of strings, one element per argument"
+                            % (tag, json.dumps(argv)))
+        else:
+            forbidden_shape(argv, tag)
+    else:
+        problems.append("%s: in neither .clodex/profile.json nor %s — a new action is added to "
+                        "the profile and committed first" % (tag, ", ".join(LOCAL)))
     for w in act.get("argv") or []:
         for n in TOKENS:
             if "{%s}" % n in w:
                 problems.append("%s: argv still holds {%s}; §6 substitutes nothing, so it would be "
                                 "passed to the command as literal text" % (tag, n))
 
+def at_start(path):
+    start = snap["git"]["start_head"]
+    if not path or not start:
+        return None
+    try:
+        return subprocess.check_output(["git", "show", "%s:%s" % (start, path)],
+                                       stderr=subprocess.DEVNULL, cwd=snap["repo"]).decode()
+    except subprocess.CalledProcessError:
+        return None
+
 # A repo that writes nothing has nothing to book-keep and nothing to commit.
-writes = bool((prof.get("changelog") or {}).get("path")) or bool(prof["version"]["source"])
-if not writes:
+src = prof["version"]["source"]
+cl = (prof.get("changelog") or {}).get("path")
+if not (src or cl):
     for x in payload.get("actions", []):
         if x.get("id") in ("bookkeeping", "release-commit"):
             problems.append("%s: this repo has no changelog and no version source, so there is "
@@ -774,6 +885,10 @@ else:
     if prof["tag"]["enabled"] and not book[0].get("tag"):
         problems.append("bookkeeping: tag is required — this repo tags releases (%s), and {tag} in "
                         "any profile argv is resolved from it" % prof["tag"]["format"])
+    if src and at_start(src) is None and not book[0].get("version_file"):
+        problems.append("bookkeeping: %s does not exist yet, so version_file is required — the "
+                        "exact content ship will create, the way changelog carries the whole file "
+                        "for a changelog this repo has never had (§7.1)" % src)
 
 key = lambda d: json.dumps([d.get("class"), d.get("reason"), d.get("risk")], sort_keys=True)
 for missing in sorted({key(d) for d in snap["verification"]["debt"]}
@@ -863,9 +978,9 @@ mechanical instead of remembered:
 # CONFIRMED stays empty unless the user just said yes, in this turn, to a
 # literal always-ask-exact argv. Then, and only then: CONFIRMED="confirmed-by-user".
 RC=0
-CONFIRMED="" python3 - "$STATE" "$RUN_DIR" "push-main" <<'PY' || RC=$?
+CONFIRMED="" python3 - "$STATE" "$RUN_DIR" "$CLODEX_HOME" "push-main" <<'PY' || RC=$?
 import json, os, subprocess, sys
-state, run_dir, action_id = sys.argv[1], sys.argv[2], sys.argv[3]
+state, run_dir, clodex_home, action_id = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 # 64 is the guard refusing: nothing ran, and there is nothing to reconcile.
 # Any other non-zero came from the action itself, which is §8's problem.
@@ -923,22 +1038,46 @@ if left:
          "written (§5); one reaching here would be passed to the command as literal text."
          % (action_id, json.dumps(sorted(set(left)))))
 
+# The field set comes from the profile SCHEMA, not from the keys this profile
+# instance happened to write: `cwd`, `target` and `env_refs` are optional there,
+# and an omitted one has to mean the schema's empty value rather than "nothing to
+# compare". Deriving that empty value from the declared type is what makes this
+# cover the next optional field added to the schema.
+try:
+    ACTION = json.load(open(os.path.join(clodex_home, "profile.schema.json")))
+    ACTION = ACTION["properties"]["actions"]["items"]
+except (OSError, ValueError, KeyError) as exc:
+    stop("cannot read the action field set from %s/profile.schema.json: %s" % (clodex_home, exc))
+REQUIRED = set(ACTION.get("required", []))
+FIELDSET = {}
+for key, spec in ACTION["properties"].items():
+    if key == "id":
+        continue
+    types = spec.get("type")
+    types = [types] if isinstance(types, str) else list(types or [])
+    FIELDSET[key] = ("required", None) if key in REQUIRED else (
+        ("omitted-means", None) if "null" in types else
+        ("omitted-means", []) if "array" in types else
+        ("omitted-means", {}) if "object" in types else ("no-empty-value", None))
+
 prof_acts = dict((a["id"], a) for a in prof["actions"])
 if action_id in prof_acts:
-    # Every field the profile declares, not a list of names kept in step by hand.
-    # `cwd` decides which package gets published; `env_refs` decides whether the
-    # credential check below happens at all. Each was compared only once it had
-    # been found uncompared — which is the argument for comparing the entry.
-    misses, wrong = [], []
-    for key, declared in sorted(prof_acts[action_id].items()):
-        if key == "id":
-            continue
-        expected = resolve(declared, misses)
+    entry, misses, wrong = prof_acts[action_id], [], []
+    for key in sorted(FIELDSET):
+        kind, empty = FIELDSET[key]
+        if key in entry:
+            expected = resolve(entry[key], misses)
+        elif kind == "required":
+            stop("%r: its profile entry is missing the required field %s" % (action_id, key))
+        elif kind == "no-empty-value":
+            stop("%r: the schema defines %s with no empty value and this profile omits it, so "
+                 "there is nothing to check the descriptor against" % (action_id, key))
+        else:
+            expected = empty
         if key not in act:
-            wrong.append("      %s: absent, but the profile declares %s"
-                         % (key, json.dumps(expected)))
+            wrong.append("      %s: absent, but the profile's is %s" % (key, json.dumps(expected)))
         elif act[key] != expected:
-            wrong.append("      %s: %s, but the profile declares %s"
+            wrong.append("      %s: %s, but the profile's is %s"
                          % (key, json.dumps(act[key]), json.dumps(expected)))
     if misses:
         stop("%r needs %s, which this run cannot supply — see §4"
@@ -1099,12 +1238,20 @@ Then write both files with your file-writing tool:
   stays in the run log and the authorization; it is release bookkeeping, not
   public changelog copy, unless the user asks for it there.
 
-The authorization's `changelog` field is **exactly the text you will write into
-that file** — which for a repo that has no changelog yet means the whole file,
-header and all, because that is what ship is about to create. §7.2's compare
-holds you to it line by line: every line the file gains must be a line of that
-field, so a header you invent at writing time but never showed the user reads as
-somebody else's edit.
+**A file this run creates is authorized by its whole content, because there is no
+pre-release state to compare it against.** Both bookkeeping files work the same
+way:
+
+| The file | Existed at `start_head` | Did not |
+|---|---|---|
+| the changelog | `changelog` is the section being inserted | `changelog` is the **whole file**, header and all |
+| the version source | `version` is the number; the compare applies that one edit to the pre-release file | `version_file` carries the **whole file**, and §5 refuses the payload without it |
+
+The compare holds you to whichever it is: with a pre-release state it checks that
+the file is that state plus exactly the authorized edit, and without one it checks
+the file against the authorized content byte for byte. A header you invent at
+writing time but never showed the user reads as somebody else's edit either way,
+which is the point.
 
 Reconcile (§8) is the version value and the changelog section: both present means
 done, either missing means the step failed and is redone.
@@ -1125,7 +1272,7 @@ is not ship's change, and the version check alone would have passed it.
 
 ```bash
 python3 - "$STATE" "$RUN_DIR" "$PROFILE" <<'PY'
-import difflib, json, os, subprocess, sys
+import copy, difflib, json, os, subprocess, sys
 state, run_dir, profile_path = sys.argv[1], sys.argv[2], sys.argv[3]
 snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
 try:
@@ -1147,63 +1294,116 @@ book, start = book[0], snap["git"]["start_head"]
 want_v, want_c = book.get("version"), book.get("changelog")
 
 def at_start(path):
+    """The file's content before the run. None means it did not exist."""
     if not path or not start:
-        return ""
+        return None
     try:
         return subprocess.check_output(["git", "show", "%s:%s" % (start, path)],
                                        stderr=subprocess.DEVNULL).decode()
     except subprocess.CalledProcessError:
-        return ""                       # the file did not exist before the run
-
-def version_in(text, where):
-    field = prof["version"].get("field")
-    if not text:                        # absent, or created by this run: no value yet
         return None
-    if not field:
-        return text.strip()
+
+def parsed(text, where):
     try:
-        node = json.loads(text)
+        return json.loads(text)
     except ValueError:
         raise SystemExit("RECONCILE: STOP — %s sets version.field %r but %s is not JSON. This "
                          "stage cannot read or write that safely; fix the profile."
-                         % (profile_path, field, where))
-    for key in field.split("."):
-        node = node.get(key) if isinstance(node, dict) else None
-    return node
+                         % (profile_path, prof["version"].get("field"), where))
+
+def with_version(doc, field, value):
+    """A copy of `doc` with the dotted `field` set to `value` — the one edit
+    §7.1 authorizes, applied to the pre-release file."""
+    out = copy.deepcopy(doc)
+    node, keys = out, field.split(".")
+    for key in keys[:-1]:
+        if not isinstance(node, dict) or key not in node:
+            return None
+        node = node[key]
+    if not isinstance(node, dict) or keys[-1] not in node:
+        return None
+    node[keys[-1]] = value
+    return out
 
 def changed(now, was):
     return [l for l in difflib.unified_diff((was or "").splitlines(), (now or "").splitlines(),
                                             lineterm="", n=0)
             if l[:1] in "+-" and not l.startswith(("+++", "---"))]
 
+def norm(t):
+    return "\n".join(l.rstrip() for l in (t or "").splitlines() if l.strip())
+
 verdicts = []
 if src:
     if not want_v:
         raise SystemExit("RECONCILE: STOP — the authorization records no version to check against")
     now = open(src).read() if os.path.exists(src) else None
-    was = at_start(src)
-    got, before = version_in(now, src), version_in(was, "%s at %s" % (src, (start or "")[:8]))
-    tokens = [t for t in (str(want_v), str(before)) if t and t != "None"]
-    stray = [l for l in changed(now, was) if not any(t in l for t in tokens)]
-    print("version: on disk %r | authorized %r | before the run %r" % (got, want_v, before))
-    verdicts.append(("version",
-                     "FOREIGN: " + " | ".join(stray[:3]) if stray else
-                     "authorized" if got == want_v else
-                     "pre-release" if got == before else "FOREIGN: %r" % (got,)))
+    was, field = at_start(src), prof["version"].get("field")
+    if was is None:
+        # This run is CREATING the file, so there is no pre-release state to
+        # diff against and every line of it is new. The authorization has to
+        # carry the whole content, exactly as it does for a changelog the repo
+        # has never had; §5 refuses the payload without it.
+        want_file = book.get("version_file")
+        if not want_file:
+            raise SystemExit("RECONCILE: STOP — %s does not exist at %s and the authorization "
+                             "records no version_file, so there is nothing to check the file ship "
+                             "is creating against (§7.1)" % (src, (start or "")[:8]))
+        print("version: %s is created by this run | %d authorized bytes" % (src, len(want_file)))
+        verdicts.append(("version",
+                         "authorized" if now is not None and norm(now) == norm(want_file) else
+                         "pre-release" if now is None else
+                         "FOREIGN: " + (" | ".join(changed(norm(now), norm(want_file))[:3])
+                                        or "not the authorized content")))
+    else:
+        # Containment, the same shape as the changelog test below: the file must
+        # be its pre-release self with exactly the authorized edit applied. A
+        # line-membership test passes an added `"evil": "1.4.0"` dependency,
+        # because that line contains the version string too.
+        if field:
+            now_doc = parsed(now, src) if now is not None else None
+            expected = with_version(parsed(was, "%s at %s" % (src, (start or "")[:8])),
+                                    field, want_v)
+            if expected is None:
+                raise SystemExit("RECONCILE: STOP — version.field %r is not a path that exists in "
+                                 "%s as it was before the run" % (field, src))
+            def at(doc):
+                for key in field.split("."):
+                    doc = doc.get(key) if isinstance(doc, dict) else None
+                return doc
+            print("version: on disk %r | authorized %r | before the run %r"
+                  % (at(now_doc), want_v, at(parsed(was, src))))
+            # Diff against what was AUTHORIZED, not against the pre-release file:
+            # ship's own edit is in both, so what is left is the unauthorized part.
+            def canon(doc):
+                return json.dumps(doc, indent=2, sort_keys=True)
+            verdicts.append(("version",
+                             "authorized" if now_doc == expected else
+                             "pre-release" if now_doc == parsed(was, src) else
+                             "FOREIGN: " + (" | ".join(changed(canon(now_doc), canon(expected))[:4])
+                                            or "not the authorized edit")))
+        else:
+            before = was.strip()
+            expected = was.replace(before, str(want_v)) if before else None
+            print("version: on disk %r | authorized %r | before the run %r"
+                  % ((now or "").strip(), want_v, before))
+            verdicts.append(("version",
+                             "authorized" if expected is not None and now == expected else
+                             "pre-release" if now == was else
+                             "FOREIGN: " + (" | ".join(changed(now, expected)[:4]) or "not the "
+                                            "authorized edit")))
 
 if cl:
     if not want_c:
         raise SystemExit("RECONCILE: STOP — the authorization records no changelog text to check "
                          "against")
     now = open(cl).read() if os.path.exists(cl) else ""
-    was = at_start(cl)
+    was = at_start(cl) or ""
     # The whole test, and it is a containment one rather than a line-membership
     # one: the file must be its pre-release self with the authorized text
     # inserted ONCE. A per-line check against the set of authorized lines passes
     # a duplicate of any of those lines dropped anywhere else in the file —
     # `- did the thing` appended into last release's section reads as ship's own.
-    def norm(t):
-        return "\n".join(l.rstrip() for l in (t or "").splitlines() if l.strip())
     residue = now.replace(want_c, "", 1) if want_c and want_c in now else now
     inserted_once = bool(want_c) and want_c in now and norm(residue) == norm(was)
     print("changelog: holds the authorized section: %s | and nothing else changed: %s"
