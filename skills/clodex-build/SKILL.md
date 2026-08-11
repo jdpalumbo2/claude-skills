@@ -441,11 +441,11 @@ while i < len(fields) and fields[i]:
         paths.append(fields[i]); i += 1   # the origin too: a move OUT of an unowned path counts
     for p in paths:
         if not any(under(p, o) for o in owned):
-            stray.append((p, ack(p)))
-for path, acked in sorted(set(stray)):
-    print("OUTSIDE  %-38s %s" % (path, "acknowledged dirt — leave it alone" if acked
-                                 else "NOT owned by this batch"))
-unexplained = sorted({p for p, acked in stray if not acked})
+            stray.append((p, ack(p), entry[:2]))
+for path, acked, xy in sorted(set(stray)):
+    print("OUTSIDE  [%s] %-34s %s" % (xy, path, "acknowledged dirt — leave it alone" if acked
+                                      else "NOT owned by this batch"))
+unexplained = sorted({p for p, acked, xy in stray if not acked})
 print("clean — the contract held" if not unexplained
       else "STOP — %d path(s) the contract does not allow: %s"
            % (len(unexplained), " ".join(unexplained)))
@@ -473,7 +473,7 @@ What comes back:
 |---|---|---|
 | `clean — the contract held` | nothing changed outside the owned paths except dirt the run already acknowledged | §8 |
 | `STOP` + a path marked **NOT owned by this batch** | the implementer strayed | Stop. This is a scope change, and scope changes are the user's call. Capture it, show it, ask (below). |
-| a path marked **acknowledged dirt** | it was already dirty when the run opened, or sits under a directory that was | Leave it alone. It is not yours to stage, revert, or clean, and it is **never** a target of the restore below. The check cannot tell "still only the user's edit" from "the implementer edited it too"; if you suspect the latter, `git diff <git.start_head> -- <path>` shows everything that happened to it since the run opened. |
+| a path marked **acknowledged dirt** | it was already dirty when the run opened, or sits under a directory that was | Leave it alone. It is not yours to stage, revert, or clean, and it is **never** a target of the restore below. The check cannot tell "still only the user's edit" from "the implementer edited it too"; if you suspect the latter, `git diff "$(python3 "$STATE" rebuild "$RUN_DIR" \| python3 -c 'import json,sys;print(json.load(sys.stdin)["git"]["start_head"])')" -- <path>` shows everything that happened to it since the run opened. |
 | `.clodex/profile.json` | the router repaired the profile and did not commit it, or the user edited it | Leave it, and say so in chat. It is the one file `git check-ignore` lets through, and it is never yours to stage (§2). |
 
 For a path the check printed as **NOT owned by this batch** — and only those —
@@ -490,10 +490,15 @@ path, and the work continues; or **it is not needed** — restore those paths an
 re-run the batch. Restore only after they say so, and only paths the check itself
 listed as `NOT owned by this batch`:
 
+Which of the two commands applies is the `[XY]` the check printed beside the
+path: **`[??]` is untracked** — git has never seen it, so there is nothing to
+restore it to and it is moved aside; **anything else is tracked**, and
+`git checkout` puts the committed content back.
+
 ```bash
 mkdir -p "$RUN_DIR/stray"
-git checkout -- <stray tracked paths>          # tracked, and clean when the run opened
-mv <stray untracked path> "$RUN_DIR/stray/"    # untracked: move aside, never rm
+git checkout -- <stray paths the check printed with a tracked [XY]>
+mv <stray path the check printed as [??]> "$RUN_DIR/stray/"    # never rm
 ```
 
 **Do not select these paths by hand, and do not re-derive them.** "Not in
