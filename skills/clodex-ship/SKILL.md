@@ -491,27 +491,37 @@ Then settle the three things the profile cannot settle on its own:
    is a human decision outside clodex v0.1. Then the release does not go live in
    this run and it closes at `not-deployed` (§9), with that as the reason.
 
-**Fill every `{braced}` placeholder from run state now, before the argv is
-written into the authorization** — `{version}` and `{tag}` from the two you just
-settled, `{branch}` from `$BRANCH`, `{run}` from `$RUN`. A placeholder you cannot
-fill is a **stop**, never a guess.
+**The placeholder vocabulary is exactly five tokens**, and nothing else in an
+argv is a placeholder:
 
-**No brace survives into the stored approval.** §6's executor runs
-`act["argv"]` verbatim and substitutes nothing — that is the whole point of
-taking the argv out of the manifest — so an unfilled placeholder would be passed
-to git or to a deploy CLI as the literal seven characters `{commit}`. The rule is
-therefore mechanical, and §6 enforces it: a stored argv containing `{` or `}`
-stops the run.
+| Token | Filled from |
+|---|---|
+| `{version}` | the version you just settled |
+| `{tag}` | `tag.format` filled with it |
+| `{branch}` | `$BRANCH` |
+| `{run}` | `$RUN` |
+| `{commit}` | **nothing — see below** |
 
-**Consequence: `{commit}` cannot be used in clodex v0.1.** The release commit does
-not exist when the authorization is written, and there is no second, later
-authorization to fill it in — one authorization is the design. An action whose
-argv needs the release sha is a **stop**: name it, say this version cannot
-authorize it, and let the user change the profile to an action that does not need
-one (deploy from the branch or the tag, or let the host resolve `HEAD` itself).
-Nothing in the release tag needs it either — the tag step runs directly after the
-commit step, so `git tag -a <tag>` lands on HEAD, and §8's tag reconcile is what
-proves HEAD was the release commit.
+A brace that is not one of those five is ordinary text and is left alone: a
+`curl -d '{"ref":"main"}'`, a `docker --format '{{.ID}}'`, a `kubectl -o
+jsonpath=...` are all perfectly good actions, and nothing here objects to them.
+
+**Resolve all five before the argv is written into the authorization.** §6's
+executor substitutes nothing — that is what lets it compare the approved argv to
+the profile's, resolved, for **exact** equality — so a token reaching it would be
+passed to git or a deploy CLI as literal text. §5's validator refuses the
+authorization if one survives, which is the point: **the refusal lands before the
+commit, the tag and the push, not after them.**
+
+**`{commit}` cannot be used in clodex v0.1.** The release commit does not exist
+when the authorization is written, and there is no second, later authorization to
+fill it in — one authorization is the design. An action whose argv needs the
+release sha is refused at §5 with that as the reason: tell the user this version
+cannot authorize it, and let them change the profile to an action that does not
+need one (deploy from the branch or the tag, or let the host resolve `HEAD`
+itself). The release tag needs no such placeholder — the tag step runs directly
+after the commit step, so `git tag -a <tag>` lands on HEAD, and §8's tag reconcile
+is what proves HEAD was the release commit.
 
 ---
 
@@ -584,6 +594,102 @@ Rules that make this message the gate rather than a summary of one:
   lets §10 check that each authorized action actually ran — an authorization for a
   push, with no `done` push step and no reason saying why, is the "tagged but
   never pushed" release the whole state machine exists to prevent.
+
+**Then validate the payload before you append it.** Every check below could also
+be made at execution time, and §6 repeats the load-bearing ones — but a release
+that fails halfway has already committed, tagged and pushed, and those do not
+come back. This is the last moment where "no" costs nothing:
+
+```bash
+python3 - "$STATE" "$RUN_DIR" "$PROFILE" "$RUN_DIR/authorization.json" <<'PY'
+import json, os, subprocess, sys
+state, run_dir, profile_path, payload_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+STEPS = ("bookkeeping", "commit", "tag", "push", "deploy", "verify-live")
+LOCAL = ("bookkeeping", "release-commit", "release-tag")
+TOKENS = ("version", "tag", "branch", "run", "commit")     # the whole placeholder vocabulary
+FIELDS = ("id", "step", "argv", "cwd", "target", "env_refs", "policy")
+snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
+try:
+    prof = json.load(open(profile_path))
+except (OSError, ValueError) as exc:
+    raise SystemExit("DO NOT APPEND — cannot read %s: %s" % (profile_path, exc))
+payload, problems = json.load(open(payload_path)), []
+
+book = [x for x in payload.get("actions", []) if x.get("id") == "bookkeeping"]
+values = {"version": (book[0].get("version") if book else None) or "",
+          "tag": (book[0].get("tag") if book else None) or "",
+          "branch": subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                                            cwd=snap["repo"]).decode().strip(),
+          "run": snap["run"] or ""}
+def fill(word, misses):
+    for name in TOKENS:
+        token = "{%s}" % name
+        if token in word:
+            if not values.get(name):
+                misses.append(name)
+            word = word.replace(token, values.get(name, ""))
+    return word
+
+prof_acts = dict((a["id"], a) for a in prof["actions"])
+for act in payload.get("actions", []):
+    tag = act.get("id") or "<descriptor with no id>"
+    for f in FIELDS:
+        if f not in act:
+            problems.append("%s: no %r — every descriptor carries all of %s"
+                            % (tag, f, ", ".join(FIELDS)))
+    if act.get("step") not in STEPS:
+        problems.append("%s: step %r is not one of %s" % (tag, act.get("step"), ", ".join(STEPS)))
+    if act.get("id") in prof_acts:
+        want = prof_acts[act["id"]]
+        if act.get("policy") != want["policy"]:
+            problems.append("%s: policy %r, but the profile says %r — the profile wins"
+                            % (tag, act.get("policy"), want["policy"]))
+        misses = []
+        expected = [fill(w, misses) for w in want["argv"]]
+        if misses:
+            problems.append("%s: its argv needs %s, which this run cannot supply. {commit} never "
+                            "can — the release commit does not exist yet, and there is no second "
+                            "authorization to fill it in later (§4)."
+                            % (tag, ", ".join("{%s}" % m for m in sorted(set(misses)))))
+        elif expected != act.get("argv"):
+            problems.append("%s: argv is not the profile's resolved from run state:\n"
+                            "         profile resolves to: %s\n         proposed:            %s"
+                            % (tag, json.dumps(expected), json.dumps(act.get("argv"))))
+    elif act.get("id") not in LOCAL:
+        problems.append("%s: in neither .clodex/profile.json nor %s — a new action is added to the "
+                        "profile and committed first" % (tag, ", ".join(LOCAL)))
+    for w in act.get("argv") or []:
+        for n in TOKENS:
+            if "{%s}" % n in w:
+                problems.append("%s: argv still holds {%s}; §6 substitutes nothing, so it would be "
+                                "passed to the command as literal text" % (tag, n))
+
+if len(book) != 1:
+    problems.append("expected exactly one bookkeeping descriptor, found %d" % len(book))
+elif not (book[0].get("version") and book[0].get("changelog")):
+    problems.append("bookkeeping: version and changelog are both required — §7.2 compares the "
+                    "files on disk against them before anything is staged")
+
+key = lambda d: json.dumps([d.get("class"), d.get("reason"), d.get("risk")], sort_keys=True)
+for missing in sorted({key(d) for d in snap["verification"]["debt"]}
+                      - {key(d) for d in payload.get("accepted_debt", [])}):
+    problems.append("this authorization does not accept recorded debt: %s" % missing)
+
+for p in problems:
+    print("PROBLEM:", p)
+print("AUTHORIZATION VALID — append it" if not problems
+      else "DO NOT APPEND — %d problem(s)" % len(problems))
+PY
+```
+
+`DO NOT APPEND` means go back to the user with a corrected message; it never
+means append anyway and deal with it at the step. Then:
+
+```bash
+python3 "$STATE" append "$RUN_DIR" < "$RUN_DIR/authorization.json"
+```
+
+For reference, the payload that validator reads:
 - **`always-ask-exact` is presented literally, every time.** Never folded into
   "and then deploys", never abbreviated with an ellipsis, never batched with its
   neighbours — here **and** again immediately before each execution, including on
@@ -603,8 +709,8 @@ Rules that make this message the gate rather than a summary of one:
   yes to that; you never append an approval covering part of what you showed.
   Record what they approved, not what you proposed.
 
-On yes, append — with the actions exactly as shown and the debt items copied
-verbatim from `verification.debt`:
+On yes, write the payload to `$RUN_DIR/authorization.json` — with the actions
+exactly as shown and the debt items copied verbatim from `verification.debt`:
 
 ```json
 {"e": "approval:granted", "scope": "release-authorization", "by": "user",
@@ -612,7 +718,8 @@ verbatim from `verification.debt`:
  "actions": [
    {"id": "bookkeeping", "step": "bookkeeping",
     "argv": null, "writes": ["CHANGELOG.md", "package.json"],
-    "version": "1.4.0", "changelog": "## 1.4.0 — 2026-08-11\n- <the exact lines>",
+    "version": "1.4.0", "tag": "v1.4.0",
+    "changelog": "## 1.4.0 — 2026-08-11\n- <the exact lines>",
     "cwd": null, "target": "working tree", "env_refs": [],
     "policy": "auto-with-authorization"},
    {"id": "release-commit", "step": "commit",
@@ -757,28 +864,53 @@ if not act.get("argv"):
 # what this action is. The committed profile is the authority on membership and
 # on policy; a mistyped policy would silently delete the always-ask-exact gate,
 # and the user would have read the same wrong label in the authorization.
-prof = json.load(open(os.path.join(snap["repo"], ".clodex", "profile.json")))
+try:
+    prof = json.load(open(os.path.join(snap["repo"], ".clodex", "profile.json")))
+except (OSError, ValueError) as exc:
+    stop("cannot read .clodex/profile.json: %s" % exc)
+
+# The same resolution §5 did, redone here from run state. Doing it rather than
+# skipping over placeholders is what keeps the comparison EXACT: a profile word
+# of "release-{version}" resolves to one string, and only that string may run.
+TOKENS = ("version", "tag", "branch", "run", "commit")
+book = [x for a in auth for x in a["actions"] if x.get("id") == "bookkeeping"]
+values = {"version": (book[0].get("version") if book else None) or "",
+          "tag": (book[0].get("tag") if book else None) or "",
+          "branch": subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                                            cwd=snap["repo"]).decode().strip(),
+          "run": snap["run"] or ""}
+def fill(word, misses):
+    for name in TOKENS:
+        token = "{%s}" % name
+        if token in word:
+            if not values.get(name):
+                misses.append(name)
+            word = word.replace(token, values.get(name, ""))
+    return word
+
+left = [w for w in act["argv"] for n in TOKENS if "{%s}" % n in w]
+if left:
+    stop("%r still holds placeholder(s) %s. Placeholders are resolved when the authorization is "
+         "written (§5); one reaching here would be passed to the command as literal text."
+         % (action_id, json.dumps(sorted(set(left)))))
+
 prof_acts = dict((a["id"], a) for a in prof["actions"])
 if action_id in prof_acts:
     want = prof_acts[action_id]
     if act.get("policy") != want["policy"]:
         stop("%r is %r in .clodex/profile.json but the authorization recorded %r — the profile wins"
              % (action_id, want["policy"], act.get("policy")))
-    filled = want["argv"]
-    if len(filled) != len(act["argv"]) or any(
-            "{" not in w and w != g for w, g in zip(filled, act["argv"])):
-        stop("%r does not match its profile entry:\n      profile: %s\n      approved: %s"
-             % (action_id, json.dumps(filled), json.dumps(act["argv"])))
+    misses = []
+    expected = [fill(w, misses) for w in want["argv"]]
+    if misses:
+        stop("%r needs %s, which this run cannot supply — see §4"
+             % (action_id, ", ".join("{%s}" % m for m in sorted(set(misses)))))
+    if expected != act["argv"]:
+        stop("%r is not this repo's action resolved from run state:\n      profile: %s\n"
+             "      approved: %s" % (action_id, json.dumps(expected), json.dumps(act["argv"])))
 elif action_id not in LOCAL:
     stop("%r is in neither .clodex/profile.json nor %s — nothing outside those may run at ship"
          % (action_id, ", ".join(LOCAL)))
-
-# A placeholder that survived into the approval would be passed to the command
-# as literal text: the argv that runs would not be the argv anyone approved.
-unfilled = [a for a in act["argv"] if "{" in a or "}" in a]
-if unfilled:
-    stop("%r still holds unfilled placeholders %s — fill them at authorization time (§4)"
-         % (action_id, json.dumps(unfilled)))
 
 missing = [n for n in act.get("env_refs") or [] if not os.environ.get(n)]
 if missing:
@@ -788,9 +920,12 @@ if act.get("policy") == "always-ask-exact" and os.environ.get("CONFIRMED") != "c
          "      turn, then re-run with CONFIRMED=confirmed-by-user:\n      %s"
          % (action_id, json.dumps(act["argv"])))
 if act.get("cwd") and os.path.isabs(act["cwd"]):
-    stop("%r has an absolute cwd %r — the schema says repo-relative, and an absolute one "
-         "runs the action outside this repo" % (action_id, act["cwd"]))
-cwd = os.path.join(snap["repo"], act["cwd"]) if act.get("cwd") else snap["repo"]
+    stop("%r has an absolute cwd %r — the schema says repo-relative" % (action_id, act["cwd"]))
+root = os.path.realpath(snap["repo"])
+cwd = os.path.realpath(os.path.join(root, act.get("cwd") or ""))
+if cwd != root and not cwd.startswith(root + os.sep):
+    stop("%r has cwd %r, which resolves to %s — outside this repo"
+         % (action_id, act.get("cwd"), cwd))
 print("running:", json.dumps(act["argv"]), "in", cwd)
 sys.exit(subprocess.call(act["argv"], cwd=cwd))
 PY
@@ -810,10 +945,24 @@ printf 'rc=%s\n' "$RC"
   `auto-with-authorization` would silently delete the `always-ask-exact` gate —
   and the user would never notice, because the authorization message they read
   carries the same wrong label. So the executor opens `.clodex/profile.json` and
-  refuses on any disagreement, and refuses an id that is in neither the profile
-  nor ship's own three. This is the mechanism behind the profile schema's
-  *"Nothing outside this list may be run at ship"*, and behind a repo marking its
-  red-tier actions `always-ask-exact` and expecting that to hold.
+  refuses on any disagreement, refuses an id that is in neither the profile nor
+  ship's own three, and refuses outright if the profile cannot be read. This is
+  the mechanism behind the profile schema's *"Nothing outside this list may be run
+  at ship"*, and behind a repo marking its red-tier actions `always-ask-exact` and
+  expecting that to hold.
+- **Know what that authority is not.** `.clodex/profile.json` is working-tree
+  state, not a hash the authorization pins: an edit to it between the
+  authorization and the step changes what the executor compares against, and it
+  would report a mismatch against the approval rather than noticing the profile
+  moved. It is committed repo state that this stage never edits (§2), so the
+  realistic case is a person editing it mid-release — and then the mismatch is
+  the right answer, because what the user approved and what the repo now declares
+  really have come apart. Take it to them; do not reconcile it yourself.
+- **Ship's own three ids are checked by nothing.** `bookkeeping`,
+  `release-commit` and `release-tag` have no profile entry to compare against, so
+  their argv is exactly what §5 wrote. That is the design — a repo does not
+  declare its own release commit — and it is why §7.2's guard and the pathspec
+  matter as much as they do.
 
 **Read `rc` before you read anything else, because it says whether the world
 changed:**
@@ -907,10 +1056,132 @@ Then write both files with your file-writing tool:
   stays in the run log and the authorization; it is release bookkeeping, not
   public changelog copy, unless the user asks for it there.
 
+The authorization's `changelog` field is **exactly the text you will write into
+that file** — which for a repo that has no changelog yet means the whole file,
+header and all, because that is what ship is about to create. §7.2's compare
+holds you to it line by line: every line the file gains must be a line of that
+field, so a header you invent at writing time but never showed the user reads as
+somebody else's edit.
+
 Reconcile (§8) is the version value and the changelog section: both present means
 done, either missing means the step failed and is redone.
 
 ### 7.2 commit — the pathspec is the whole safety mechanism
+
+**First, before anything is staged: are these files only ship's change?** This
+runs on every path into this step — fresh or resumed — because that is the point
+of it. A session that finished §7.1, died, and came back does not re-run §7.1's
+guard, and `clodex-verify` §8 explicitly invites the user to edit and commit
+files themselves in between. Without this, their edit is staged into the release
+commit and `GUARD OK` is printed over the top of it.
+
+It asks a stricter question than "is my value in there": **does this file differ
+from its pre-release state only in the way the authorization describes?** A
+`package.json` carrying the authorized version *and* a dependency somebody added
+is not ship's change, and the version check alone would have passed it.
+
+```bash
+python3 - "$STATE" "$RUN_DIR" "$PROFILE" <<'PY'
+import difflib, json, os, subprocess, sys
+state, run_dir, profile_path = sys.argv[1], sys.argv[2], sys.argv[3]
+snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
+try:
+    prof = json.load(open(profile_path))
+except (OSError, ValueError) as exc:
+    raise SystemExit("RECONCILE: STOP — cannot read %s: %s" % (profile_path, exc))
+auth = [a for a in snap["approvals"]
+        if a["scope"] == "release-authorization" and a["revoked"] is None]
+book = [x for a in auth for x in a["actions"] if x.get("id") == "bookkeeping"]
+if len(book) != 1:
+    raise SystemExit("RECONCILE: STOP — expected one authorized bookkeeping descriptor, found %d"
+                     % len(book))
+book, start = book[0], snap["git"]["start_head"]
+want_v, want_c = book.get("version"), book.get("changelog")
+
+def at_start(path):
+    if not path or not start:
+        return ""
+    try:
+        return subprocess.check_output(["git", "show", "%s:%s" % (start, path)],
+                                       stderr=subprocess.DEVNULL).decode()
+    except subprocess.CalledProcessError:
+        return ""                       # the file did not exist before the run
+
+def version_in(text, where):
+    field = prof["version"].get("field")
+    if text is None:
+        return None
+    if not field:
+        return text.strip()
+    try:
+        node = json.loads(text)
+    except ValueError:
+        raise SystemExit("RECONCILE: STOP — %s sets version.field %r but %s is not JSON. This "
+                         "stage cannot read or write that safely; fix the profile."
+                         % (profile_path, field, where))
+    for key in field.split("."):
+        node = node.get(key) if isinstance(node, dict) else None
+    return node
+
+def changed(now, was):
+    return [l for l in difflib.unified_diff((was or "").splitlines(), (now or "").splitlines(),
+                                            lineterm="", n=0)
+            if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+
+verdicts = []
+src = prof["version"]["source"]
+if src:
+    if not want_v:
+        raise SystemExit("RECONCILE: STOP — the authorization records no version to check against")
+    now = open(src).read() if os.path.exists(src) else None
+    was = at_start(src)
+    got, before = version_in(now, src), version_in(was, "%s at %s" % (src, (start or "")[:8]))
+    tokens = [t for t in (str(want_v), str(before)) if t and t != "None"]
+    stray = [l for l in changed(now, was) if not any(t in l for t in tokens)]
+    print("version: on disk %r | authorized %r | before the run %r" % (got, want_v, before))
+    verdicts.append(("version",
+                     "FOREIGN: " + " | ".join(stray[:3]) if stray else
+                     "authorized" if got == want_v else
+                     "pre-release" if got == before else "FOREIGN: %r" % (got,)))
+
+cl = (prof.get("changelog") or {}).get("path")
+if cl:
+    if not want_c:
+        raise SystemExit("RECONCILE: STOP — the authorization records no changelog text to check "
+                         "against")
+    now = open(cl).read() if os.path.exists(cl) else ""
+    was = at_start(cl)
+    lines = changed(now, was)
+    want_lines = set(want_c.splitlines())
+    # A release adds a section. It never removes history, and it never adds a
+    # line that is not part of the text the user approved.
+    stray = [l for l in lines
+             if l.startswith("-") or (l[1:].strip() and l[1:] not in want_lines)]
+    print("changelog: holds the authorized section:", bool(want_c) and want_c in now)
+    verdicts.append(("changelog",
+                     "FOREIGN: " + " | ".join(stray[:3]) if stray else
+                     "authorized" if want_c in now else
+                     "pre-release" if now == was else "FOREIGN: not the authorized section"))
+
+for name, v in verdicts:
+    print("%-10s %s" % (name, v))
+states = [v for _, v in verdicts]
+if any(v.startswith("FOREIGN") for v in states):
+    print("RECONCILE: STOP — a release file holds something nobody authorized. Somebody edited it "
+          "outside this run. Show it to the user; never overwrite it, and never stage it.")
+elif not states:
+    print("RECONCILE: done — this repo has no changelog and no version source, so there is "
+          "nothing for a release commit to contain (§7.3)")
+elif all(v == "authorized" for v in states):
+    print("RECONCILE: done — both files hold exactly what was authorized, and nothing else")
+else:
+    print("RECONCILE: failed — ship's own work is missing or half-written; go back to §7.1")
+PY
+```
+
+**Only `RECONCILE: done` continues into the staging below.** `failed` goes back
+to §7.1 to finish the writing; `STOP` goes to the user, and nothing is staged,
+overwritten, or committed until they have dealt with it.
 
 ```bash
 git add -- <changelog path> <version source>
@@ -1064,105 +1335,59 @@ step:
 
 | Step | The question | The check | done | failed → retry | stop |
 |---|---|---|---|---|---|
-| `bookkeeping` | do the files hold **what was authorized**? | read `version.source` at `version.field` and the changelog section, and compare them to the standing authorization's `bookkeeping` descriptor — its `version` and `changelog` fields, recorded for exactly this (§5) | both match the descriptor | both are still the pre-release values, or one matches and the other is untouched — your own half-done work | a value that matches **neither** the pre-release state nor the authorized one: somebody edited a release file between sessions, and `clodex-verify` §8 invites exactly that. Show it and stop; never overwrite it. |
+| `bookkeeping` | do the files hold **only** what was authorized? | **§7.2's compare**, which is the same script and runs on every path into the commit step anyway | it prints `RECONCILE: done` | `RECONCILE: failed` — your own half-done work | `RECONCILE: STOP` — a release file changed in a way the authorization does not describe. `clodex-verify` §8 invites exactly that. Show it; never overwrite it. |
 | `commit` | is HEAD the release commit? | `git log -1 --format='%H %s'`; compare the sha to `batches[].commit` and read `git show --stat HEAD` | HEAD is not a batch commit and touches only the release files | HEAD is still the last batch commit | HEAD is neither — someone else committed |
 | `tag` | does the tag exist, and where does it point? | `git tag --list "<tag>"`; `git rev-parse --verify "refs/tags/<tag>^{commit}"`; `git rev-parse HEAD` | it exists and points at the commit the release was cut from — the release commit, or HEAD-at-tag-time in a repo that makes none (§7.3) | it does not exist | it exists and points somewhere else — never `-f`, never delete: the user decides |
 | `push` | did the remote advance? | `git ls-remote "$REMOTE" "refs/heads/$BRANCH"` vs `git rev-parse HEAD`; and if an action publishes the tag, `git ls-remote --tags "$REMOTE" "refs/tags/<tag>"` | the remote sha equals the release commit, **and** the tag ref is on the remote when one was to be published | the ref is absent, the tag was to be published and is not there, or the remote sha is an ancestor of HEAD (`git merge-base --is-ancestor <remote sha> HEAD`) | the remote sha is not an ancestor — someone else pushed; never force |
 | `deploy` | is this version live? | a **version-aware** `verify_live` check — one that asserts the new version, tag, or build id and would fail against the old release — or the host's own deployment list, read-only | such a check passes, or the list shows a deployment for the release commit | **only on an affirmative negative**: a version-aware check ran and returned the **old** version, or the list shows no deployment for this commit | **the default.** No version-aware check exists (`verify_live` is `[]`, or every check would pass against the old release too) and you cannot query the host: you have established nothing. Ask the user to look before anything re-runs. |
 | `verify-live` | — | just run the checks again; they are reads | — | — | — |
 
-Four of those rows are a `git` one-liner you can read at a glance. Two are not,
-and they are the two where guessing costs the most — so they are scripts.
-
-**`bookkeeping`** — what is on disk, against what was authorized, with the
-pre-release value from `start_head` as the third possibility:
-
-```bash
-python3 - "$STATE" "$RUN_DIR" "$PROFILE" <<'PY'
-import json, os, subprocess, sys
-state, run_dir, profile_path = sys.argv[1], sys.argv[2], sys.argv[3]
-snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
-prof = json.load(open(profile_path))
-auth = [a for a in snap["approvals"]
-        if a["scope"] == "release-authorization" and a["revoked"] is None]
-book = [x for a in auth for x in a["actions"] if x.get("id") == "bookkeeping"]
-if not book:
-    raise SystemExit("no authorized bookkeeping descriptor — nothing to compare against")
-book, start = book[0], snap["git"]["start_head"]
-
-def at_start(path):                      # what this file held before the run
-    try:
-        return subprocess.check_output(
-            ["git", "show", "%s:%s" % (start, path)], stderr=subprocess.DEVNULL).decode()
-    except subprocess.CalledProcessError:
-        return None
-
-def version_in(text):
-    if text is None:
-        return None
-    field = prof["version"].get("field")
-    if not field:
-        return text.strip()
-    node = json.loads(text)
-    for key in field.split("."):
-        node = node.get(key) if isinstance(node, dict) else None
-    return node
-
-src = prof["version"]["source"]
-now_v = version_in(open(src).read()) if src and os.path.exists(src) else None
-was_v = version_in(at_start(src)) if src else None
-cl = (prof.get("changelog") or {}).get("path")
-now_c = open(cl).read() if cl and os.path.exists(cl) else ""
-was_c = at_start(cl) if cl else None
-want_v, want_c = book.get("version"), book.get("changelog") or ""
-
-def verdict(now, was, ok):
-    return "authorized" if ok else ("pre-release" if now == was else "FOREIGN")
-
-v = verdict(now_v, was_v, not src or now_v == want_v)
-c = verdict(now_c, was_c or "", not cl or (want_c and want_c in now_c))
-print("version:   on disk %r | authorized %r | at start %r -> %s" % (now_v, want_v, was_v, v))
-print("changelog: holds the authorized section: %s | unchanged since start: %s -> %s"
-      % (bool(want_c) and want_c in now_c, now_c == (was_c or ""), c))
-if "FOREIGN" in (v, c):
-    print("RECONCILE: STOP — a release file holds something nobody authorized. Somebody edited it "
-          "between sessions (clodex-verify §8 invites exactly that). Show it; never overwrite it.")
-elif v == "authorized" and c == "authorized":
-    print("RECONCILE: done — both files hold what was authorized")
-else:
-    print("RECONCILE: failed — ship's own work is missing or half-written; redo the step")
-PY
-```
+Four of those rows are a `git` one-liner you can read at a glance. The other two
+are scripts, because they are the rows where guessing costs the most.
+**`bookkeeping` is §7.2's compare** — the same script, in the place every path
+into the commit step already goes through. Run it from there.
 
 **`deploy`** — only a **version-aware** check settles it, and version-aware is
-decided mechanically: the authorized version or tag appears in the check command,
-so it could not pass against the old release.
+decided mechanically: the authorized version or tag appears in the check command
+at a word boundary, so the check could not have passed against the old release.
 
 ```bash
 python3 - "$STATE" "$RUN_DIR" "$PROFILE" <<'PY'
-import json, subprocess, sys
+import json, re, subprocess, sys
 state, run_dir, profile_path = sys.argv[1], sys.argv[2], sys.argv[3]
 snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
-dep = json.load(open(profile_path))["deploy"]
+try:
+    dep = json.load(open(profile_path))["deploy"]
+except (OSError, ValueError) as exc:
+    raise SystemExit("RECONCILE: STOP — cannot read %s: %s" % (profile_path, exc))
 auth = [a for a in snap["approvals"]
         if a["scope"] == "release-authorization" and a["revoked"] is None]
-marks = [m for m in [snap["release"]["tag"]] +
+marks = [str(m) for m in [snap["release"]["tag"]] +
+         [x.get("tag") for a in auth for x in a["actions"] if x.get("tag")] +
          [x.get("version") for a in auth for x in a["actions"] if x.get("version")] if m]
+# A marker has to be specific enough to prove something. Version "2" matches
+# `test 1 -lt 2`, which says nothing about what is deployed; a marker with no dot
+# and under four characters cannot establish version-awareness at all.
+strong = [m for m in marks if "." in m or len(m) >= 4]
+weak = [m for m in marks if m not in strong]
 if dep is None or not dep["verify_live"]:
     print("RECONCILE: STOP — this repo has no verify_live check, so nothing here can establish "
           "whether the deploy landed. Ask the user to look at the host before anything re-runs.")
     raise SystemExit(0)
 aware = []
 for c in dep["verify_live"]:
-    is_aware = any(m in c["check"] for m in marks)
+    hit = [m for m in strong
+           if re.search(r"(?<![0-9A-Za-z._+-])%s(?![0-9A-Za-z._+-])" % re.escape(m), c["check"])]
     rc = subprocess.call(["bash", "-c", c["check"]])
-    print("check %-18s version-aware=%-5s rc=%s   %s" % (c["name"], is_aware, rc, c["check"]))
-    if is_aware:
+    print("check %-18s version-aware=%-5s rc=%s   %s" % (c["name"], bool(hit), rc, c["check"]))
+    if hit:
         aware.append(rc)
-print("version markers looked for:", marks or "(none — nothing to look for)")
+print("markers that could prove a version:", strong or "(none)",
+      "| too generic to prove anything:", weak or "(none)")
 if not aware:
-    print("RECONCILE: STOP — no check names %s, so every one of them would pass against the "
-          "PREVIOUS release too. They establish nothing about this deploy." % (marks or "the release"))
+    print("RECONCILE: STOP — no check names %s at a word boundary, so every one of them would "
+          "pass against the PREVIOUS release too. They establish nothing about this deploy: ask "
+          "the user to look at the host." % (strong or "any usable version marker"))
 elif 0 in aware:
     print("RECONCILE: done — a version-aware check passed: this version is serving")
 else:
@@ -1228,11 +1453,22 @@ wired for automated deploys. All of these are it:
 
 ```json
 {"e": "release:updated", "state": "not-deployed",
- "deployed": "no — the user cut deploy-prod from the release authorization; this repo's deploy trigger is manual-command"}
+ "deployed": "skipped: deploy | the user cut deploy-prod from the release authorization; this repo's deploy trigger is manual-command"}
 ```
 
-Say the reason in `deployed`, in a sentence, so the manifest answers "why isn't
-this live?" without anyone re-reading a transcript. Then close (§10).
+`deployed` carries the reason, so the manifest answers "why isn't this live?"
+without anyone re-reading a transcript. When an **authorized** step did not run,
+that reason opens with the exact grammar §10 parses:
+
+```
+skipped: <step>, <step> | <why, in your own words>
+```
+
+Step names from §6's six, comma-separated, then a `|`, then the sentence. §10
+reads that list and nothing else. It used to accept the step name appearing
+anywhere in the prose, which let *"the push-button deploy dashboard was green"*
+account for a `push` that never happened — a sentence, not a declaration. Then
+close (§10).
 
 A resumable state closes nothing. Leave the run open, tell the user the one line
 that resumes it — *"invoke `clodex` in this repo; it will offer to resume run
@@ -1252,7 +1488,7 @@ stage did what it claims:
 
 ```bash
 python3 - "$STATE" "$RUN_DIR" <<'PY'
-import json, subprocess, sys
+import json, re, subprocess, sys
 state, run_dir = sys.argv[1], sys.argv[2]
 snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
 rel, blockers = snap["release"], []
@@ -1280,10 +1516,28 @@ if rel["state"] != "abandoned" or rel["steps"]:
     for item in sorted(debt - accepted):
         blockers.append("debt %s was never accepted — ship is the only place it can be" % item)
 
-authorized = sorted({x.get("step") for a in auth for x in a["actions"] if x.get("step")})
+# A gate keyed on a hand-written field is deletable by leaving the field out, so
+# a descriptor with no `step` — or one outside the six names — is itself a
+# blocker rather than a descriptor with nothing to check.
+STEPS = ("bookkeeping", "commit", "tag", "push", "deploy", "verify-live")
+authorized = set()
+for a in auth:
+    for x in a["actions"]:
+        if x.get("step") in STEPS:
+            authorized.add(x["step"])
+        else:
+            blockers.append("descriptor %r has step %r, which is not one of %s — the completeness "
+                            "check below cannot see it" % (x.get("id"), x.get("step"), ", ".join(STEPS)))
+authorized = sorted(authorized)
 done_steps = {s["step"] for s in rel["steps"] if s["status"] == "done"}
-reason = " ".join(str(rel.get(k) or "") for k in ("deployed", "verified_live"))
-print("authorized steps:", authorized or "(none)", "| done:", sorted(done_steps) or "(none)")
+# The escape hatch is an explicit list, not prose: `deployed` may begin
+# "skipped: <step>, <step> | <why>". Substring-matching a sentence let
+# "the push-button deploy dashboard was green" account for a push that never ran.
+dep = rel.get("deployed")
+m = re.match(r"^skipped:\s*([^|]*)\|", dep) if isinstance(dep, str) else None
+skipped = {s.strip() for s in m.group(1).split(",")} & set(STEPS) if m else set()
+print("authorized steps:", authorized or "(none)", "| done:", sorted(done_steps) or "(none)",
+      "| declared skipped:", sorted(skipped) or "(none)")
 
 open_f = [f["id"] for f in snap["findings"] if f["disposition"] == "open"]
 print("open findings:", " ".join(open_f) or "(none)")
@@ -1302,9 +1556,9 @@ if rel["state"] in TERMINAL:
     # release state machine exists to prevent. (A resumable run is unfinished by
     # definition, so the same check there would be noise.)
     for st in authorized:
-        if st not in done_steps and st not in reason:
-            blockers.append("authorized step %r never completed and the release state does not say "
-                            "why — name it in the reason recorded in `deployed`" % st)
+        if st not in done_steps and st not in skipped:
+            blockers.append("authorized step %r never completed and `deployed` does not declare it "
+                            "skipped — say  skipped: %s | <why>  there" % (st, st))
 elif rel["state"] in RESUMABLE:
     if snap["stage"] == "closed":
         blockers.append("state %r is resumable but the run was closed" % rel["state"])
