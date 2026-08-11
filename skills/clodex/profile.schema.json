@@ -13,6 +13,8 @@
     "changelog",
     "deploy",
     "evidence",
+    "runtimes",
+    "required_env",
     "actions"
   ],
   "additionalProperties": false,
@@ -26,7 +28,7 @@
     "commands": {
       "type": "object",
       "description": "Shell commands, run from the repo root. Every key is present; null means this repo genuinely has none. An omitted gate is silently skipped at verify, which is how offline-green runs hide real defects.",
-      "required": ["build", "test", "lint", "typecheck"],
+      "required": ["install", "build", "test", "lint", "typecheck"],
       "additionalProperties": false,
       "properties": {
         "install": {"type": ["string", "null"], "description": "Dependency install, when a fresh checkout needs one before anything else runs."},
@@ -160,7 +162,7 @@
 
     "runtimes": {
       "type": "array",
-      "description": "Checked by preflight before any stage runs, so a missing toolchain fails in seconds rather than mid-build.",
+      "description": "Checked by preflight before any stage runs, so a missing toolchain fails in seconds rather than mid-build. Required: an omitted list turns that check into a permanent no-op, so a repo with nothing to check says so with []. Derive entries from package.json engines, .nvmrc, .tool-versions, or pyproject.toml requires-python rather than asking.",
       "items": {
         "type": "object",
         "required": ["name", "command"],
@@ -177,7 +179,7 @@
     "required_env": {
       "type": "array",
       "items": {"type": "string"},
-      "description": "Credential and configuration variable NAMES this repo's commands need. Names only — never values. Preflight checks each is set with `printenv <NAME> >/dev/null` and never prints it."
+      "description": "Credential and configuration variable NAMES this repo's commands need. Names only — never values. Preflight checks each is set with `printenv <NAME> >/dev/null` and never prints it. Required for the same reason as runtimes: a repo that needs none says so with []."
     },
 
     "actions": {

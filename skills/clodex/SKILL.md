@@ -29,8 +29,14 @@ actions. The stage skills own all three.
 ```bash
 CLODEX_HOME="${CLODEX_HOME:-$HOME/.claude/skills/clodex}"  # the dir holding this SKILL.md
 STATE="$CLODEX_HOME/state/clodex_state.py"
-REPO="$(git rev-parse --show-toplevel)"                    # every path below is relative to this
+REPO="$(git rev-parse --show-toplevel)"
+cd "$REPO"    # do this, do not just assume it
 ```
+
+**Every command below runs from `$REPO`.** `git check-ignore`, the repo
+inspection in §3, and `git add` all resolve relative paths against the current
+directory, so from a subdirectory they answer the wrong question — a correct
+`.gitignore` reads as missing. If a step cannot `cd`, use `git -C "$REPO" …`.
 
 | Thing | Path | Committed? |
 |---|---|---|
@@ -67,14 +73,27 @@ Run every check. A failed check stops here; do not "proceed and see." Preflight
 results are reported in chat, not logged as events — the durable part is
 recorded in `run:opened` (§6).
 
+**Order on a first run:** checks 4 and 6 read the profile, which does not exist
+yet. Do checks 1–3 and 5, run the interview (§3), then come back and finish 4
+and 6. A first run also has no `.clodex/` directory, so §2 finds nothing and
+costs one `ls`.
+
 1. **Repo root.** `git rev-parse --show-toplevel`. Not inside a work tree → stop
    and ask where the work lives. Also note the branch: `git rev-parse
    --abbrev-ref HEAD`.
-2. **Remote state.** `git remote -v`; `git ls-remote --exit-code origin HEAD
-   >/dev/null` (proves the remote is reachable *and* credentials work); `git
-   status -sb | head -1` for ahead/behind. Report divergence now — a repo that
-   is behind origin gets resolved before planning, never at ship. No remote at
-   all is fine, but say so: ship will have no push step.
+2. **Remote state.** Resolve the remote's *name* first — it is not always
+   `origin`, and halting a workflow over a hardcoded name is a self-inflicted
+   outage:
+   ```bash
+   REMOTE="$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null | cut -d/ -f1)"
+   [ -n "$REMOTE" ] || REMOTE="$(git remote | head -1)"
+   [ -n "$REMOTE" ] && git ls-remote --exit-code "$REMOTE" HEAD >/dev/null
+   git status -sb | head -1                       # ahead/behind
+   ```
+   `ls-remote` proves the remote is reachable *and* that credentials work.
+   Report divergence now — a repo behind its remote gets resolved before
+   planning, never at ship. An empty `$REMOTE` means the repo has no remote at
+   all: that is fine, but say so, because ship will have no push step.
 3. **`.clodex/` ignore rule.** Run state must never be committed; the profile
    must be:
    ```bash
@@ -93,7 +112,9 @@ recorded in `run:opened` (§6).
    ```
 4. **Runtimes.** For each entry in the profile's `runtimes`: `command -v
    <command>`, plus the version check when `min_version` is set. Missing runtime
-   → stop; it fails later and more expensively inside a stage.
+   → stop; it fails later and more expensively inside a stage. An empty list is
+   a legal answer (this repo pins no runtimes); a *missing* `runtimes` key is a
+   profile that never answered the question — go fix it in §3.
 5. **Codex auth.** `command -v codex`, then `codex login status` (expect exit 0
    and a logged-in line). Codex is not optional: plan review is default-on and
    build delegates to it. Not logged in → stop and ask the user to run
@@ -104,11 +125,6 @@ recorded in `run:opened` (§6).
    ```
    Names only. Never print, echo, log, or write a credential value.
 
-On a first run the profile does not exist yet, and checks 4 and 6 read it. Do
-checks 1–3 and 5, run the interview (§3), then come back and finish 4 and 6. A
-first run also has no `.clodex/` directory, so §2 finds nothing and costs one
-`ls`.
-
 ---
 
 ## 2. Is a run already open?
@@ -118,16 +134,26 @@ ls -1d "$REPO"/.clodex/r-*/ 2>/dev/null
 python3 "$STATE" status "$REPO/.clodex/<run-id>"
 ```
 
-A run is **open** when `status` shows a `stage:` other than `closed`. **v0.1
-allows one open run per repo.** Two open runs → resume or close the older before
-opening anything new.
+A run is **open** when `status` shows a `stage:` other than `closed`.
+
+`stage: -` is not an open run — it is a directory that never got its
+`run:opened` event, left by a session that died in the window §6 opens between
+`mkdir` and the first append. It has no brief, lane, or start commit, so there
+is nothing to resume. Close it out and open a new run:
+`echo '{"e":"run:closed"}' | python3 "$STATE" append "$RUN_DIR"` (legal on an
+empty log; it yields `stage: closed`).
+
+**v0.1 allows one open run per repo.** If you find two, the older is the one
+whose run id sorts first — the ids are `r-<date>-<letter>`, so plain
+lexicographic order is chronological. Resume it, or close it with the same
+`run:closed` append, before opening anything new.
 
 `status` also prints a `lock:` line when `lock.json` exists. That line decides
 what you may do:
 
 | `status` shows | What it means | What to do |
 |---|---|---|
-| no `lock:` line | nobody holds the run | Offer resume (below). Writes will succeed. |
+| no `lock:` line | no write is in flight and no writer died mid-write | Offer resume (below); an `append` will be accepted. This is the *normal* state even while another session is working, because the lock is taken per write and released — so a missing lock line is not proof you are alone. The one-open-run rule and the user's answer to the resume offer are what actually keep two agents off one run. |
 | `lock: held by pid N (not running) since …` | a session died mid-write | Offer resume-or-abort. On resume: `python3 "$STATE" unlock "$RUN_DIR"` — plain `unlock` succeeds only for a dead holder, which is exactly this case — then resume. Never `--force` here. |
 | `lock: … (running)` or `… (liveness unknown)` | another session owns the run, or a write is in flight right now. *Unknown* means the lock carries no usable PID — including a lock caught in the instant between its creation and its payload write, whose holder is very much alive | **Do not write.** Name the PID to the user. `unlock` will refuse. Only after the user confirms that process is gone may you run `unlock --force`. Otherwise abort here and let the other session finish. |
 
@@ -176,28 +202,47 @@ print("profile ok")
 PY
 ```
 
-(That checks types, required fields, and enums. It does not check
-`additionalProperties` or patterns — read the file too.) Missing or stale keys →
-ask for just those, and rewrite **only** those keys. Non-destructive: never
-regenerate the file wholesale, never drop `notes`.
+That checks types, required fields, and enums. It does **not** check
+`additionalProperties`, `pattern`, or `minItems` — so an unknown key, a
+malformed action id, and an action with an empty `argv` all survive it. Read the
+file yourself as well.
+
+Two things send you back to the user: a **missing** key the schema requires, and
+a **stale** profile — one whose `schema_version` is not the version
+`profile.schema.json` accepts, which is the only mechanical signal that the
+contract moved. Ask for just those keys and rewrite **only** those keys.
+Non-destructive: never regenerate the file wholesale, never drop `notes`.
 
 **It does not exist** → first-run interview:
 
 1. **Inspect before asking.** Anything you can read, do not ask about:
    ```bash
-   ls; sed -n '1,60p' package.json 2>/dev/null
+   ls; sed -n '1,60p' package.json 2>/dev/null      # scripts, engines, version
    ls Makefile pyproject.toml tox.ini vercel.json railway.json fly.toml Dockerfile 2>/dev/null
    ls .github/workflows docs 2>/dev/null
+   cat .nvmrc .tool-versions .python-version 2>/dev/null   # pinned runtimes
    git tag --sort=-v:refname | head -5
-   git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null
+   git symbolic-ref --short "refs/remotes/$REMOTE/HEAD" 2>/dev/null
    ```
+   **Fill in `runtimes` and `commands.install` here** — preflight check 4 loops
+   over `runtimes`, so a profile without it makes that check a permanent no-op.
+   `package.json` `engines`, `.nvmrc`, `.tool-versions`, and `pyproject.toml`
+   `requires-python` give you `command` and `min_version` without asking anyone.
 2. **Ask once, in one message**, only what inspection cannot settle or what is a
    decision rather than a fact: confirm the build/test/lint/typecheck commands
    (`null` where the repo genuinely has none — an omitted gate gets silently
-   skipped at verify); version source; branch rule and tag format; changelog
-   path; architecture docs and where plans go; deploy target and the exact
-   command that proves a release is live; default evidence classes; which
-   release actions clodex may take; the **names** of required env vars.
+   skipped at verify) and the runtimes you inferred; version source; branch rule
+   and tag format; changelog path; architecture docs and where plans go; deploy
+   target and the exact command that proves a release is live; default evidence
+   classes; which release actions clodex may take; the **names** of required env
+   vars.
+
+   **Evidence classes** are the four kinds of proof a plan can require, and the
+   profile's `evidence.default_classes` is which of them this repo expects by
+   default: `tests` (automated suites), `real-data` (run against
+   production-shaped input), `live-check` (the deployed thing observed working),
+   `visual` (rendered output reviewed). Ask in those terms; `clodex-plan` owns
+   the per-plan detail.
 3. **Action policy is structured, per action.** Every entry in `actions` carries
    a literal `argv` and a `policy`:
    - `auto-with-authorization` — may run once it is covered by the single
@@ -210,9 +255,24 @@ regenerate the file wholesale, never drop `notes`.
      plane marks its red-tier actions this way).
 
    Unsure → `always-ask-exact`. Nothing outside `actions` may be proposed at
-   ship; a new action gets added to the profile and committed first.
-4. **Write, validate, commit** — explicit path only, because the tree may hold
-   the user's unrelated work:
+   ship; a new action gets added to the profile and committed first. A complete
+   entry — `{braced}` placeholders are filled from run state before the argv is
+   shown or run:
+   ```json
+   {"id": "push-main",
+    "argv": ["git", "push", "origin", "main"],
+    "cwd": null,
+    "target": "origin/main",
+    "env_refs": [],
+    "policy": "auto-with-authorization"}
+   ```
+   The same repo would mark a production deploy `always-ask-exact`, so its
+   literal filled argv is shown for approval on every release.
+4. **Write, validate, commit.** Write every required key — the schema requires
+   `runtimes` and `required_env` (use `[]` for "none", never omit them) and every
+   key of `commands` including `install`, precisely so preflight checks 4 and 6
+   have something to check. Re-run the validator above, then commit by explicit
+   path, because the tree may hold the user's unrelated work:
    ```bash
    git add .clodex/profile.json && git commit -m "chore(clodex): repo profile"
    ```
@@ -271,11 +331,18 @@ open**. The acknowledged paths go into `run:opened` as `git.dirty_at_start`
 
 ### B. Before build — when a dirty path overlaps an owned path
 
+**Who runs this and when:** not the router. The router's pass ends at §6, and
+owned paths do not exist yet at that point. `clodex-build` re-reads this section
+**before opening its first batch**, comparing the plan's owned paths against
+`git.dirty_at_start` in the run snapshot. Running it earlier does not work
+mechanically either: the `approval:granted` event below binds to a plan hash, so
+the reducer refuses it — exit 1, *"approval must bind to a plan hash; none given
+and no plan is recorded"* — until `clodex-plan` has recorded a plan.
+
 A **batch** is one bounded unit of implementation work with a declared list of
 **owned paths** — the only paths that batch may touch. `clodex-plan` declares
 them. A dirty path overlaps when it *is* an owned path or sits under one.
-Overlap is resolved before build, and there are exactly **three legal
-outcomes**:
+There are exactly **three legal outcomes**:
 
 1. **Fold with acknowledgment.** The pre-existing edit will end up inside a
    clodex commit, so capture it into the run directory *first* and get the user
@@ -322,13 +389,19 @@ outcomes**:
 
 ```bash
 DATE="$(date -u +%Y-%m-%d)"
+RUN_ID=""
 for L in a b c d e f g h; do
-  RUN_ID="r-$DATE-$L"
-  [ -e "$REPO/.clodex/$RUN_ID" ] || break     # first free letter for today
+  [ -e "$REPO/.clodex/r-$DATE-$L" ] && continue
+  RUN_ID="r-$DATE-$L"; break                  # first free letter for today
 done
+[ -n "$RUN_ID" ] || echo "no free run id for $DATE"
 RUN_DIR="$REPO/.clodex/$RUN_ID"
 mkdir -p "$RUN_DIR"
 ```
+
+An empty `$RUN_ID` means all eight letters are taken: **stop and tell the user**
+— eight runs in one day means something is wrong, and appending into an existing
+run directory would corrupt someone else's history.
 
 Write the event to `$RUN_DIR/run-opened.json` with your file-writing tool, not
 shell interpolation — the brief is verbatim user text and will contain quotes:
@@ -350,9 +423,10 @@ python3 "$STATE" append "$RUN_DIR" < "$RUN_DIR/run-opened.json"   # stdin, never
 rm -f "$RUN_DIR/run-opened.json"
 ```
 
-The engine stamps `schema_version`, `seq`, and `t` — do not supply them. A `1`
-here means nothing was written and the payload is wrong; fix it and retry. A `3`
-means the event landed but `run.json` is stale — do not retry, run `rebuild`.
+The engine stamps `schema_version`, `seq`, and `t` — do not supply them. On a
+non-zero exit, read the error on stderr and act on the exit codes above: `1`
+covers a locked run, a bad payload, and a reducer invariant alike, and they need
+different responses.
 
 Then invoke the stage skill, telling it the absolute run directory — it reads
 everything else from the run itself ("clodex-plan, run dir
@@ -376,9 +450,4 @@ own entry event, so the log never claims a stage that did not start.
 |---|---|
 | Inventing an event name | The vocabulary is frozen at 23 names and the reducer refuses anything else; the full list is the `e` enum in `$CLODEX_HOME/state/schemas/event.schema.json`. This skill appends only four of them: `run:opened`, `run:closed`, `release:updated`, `approval:granted`. |
 | Hand-editing `run.json` | It is derived. Append an event; `rebuild` regenerates it. |
-| `unlock --force` because the lock looked stale | Plain `unlock` already handles a dead holder. `--force` needs the user's confirmation that the process is gone. |
-| Deleting `.clodex/<run-id>/` to start clean | Close or abandon the run (§2). The log is the record. |
-| Opening a second run because the first is awkward | One open run per repo in v0.1. |
-| Passing an event or a brief as a shell argument | Payloads travel by file/stdin. |
-| Committing run state, or echoing a credential | Check 3 and check 6 of preflight exist to prevent exactly this. |
 | Building an audit/repair/chore/sync lane on the fly | Name the shape, say it is v0.2, propose the manual approach (§4). |
