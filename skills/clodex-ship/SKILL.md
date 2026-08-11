@@ -233,7 +233,7 @@ if disk is not None:
             print("unreadable envelope, treated as absent:", path)
             continue
         if env.get("status") == "complete" and any(
-                i["sha256"] == disk for i in env.get("inputs", [])):
+                i.get("sha256") == disk for i in env.get("inputs", []) if isinstance(i, dict)):
             ran.add(env.get("role"))
 declared = sorted({r for a in plan["amendments"] for r in a["required_review"]})
 print("declared re-reviews:", declared or "(none)", "| evidenced:",
@@ -542,7 +542,30 @@ for i, item in enumerate(d, 1):
     print("%d. class: %s\n   reason: %s\n   risk:   %s" % (i, item.get("class"), item.get("reason"), item.get("risk")))'
 ```
 
-The message, in this shape and this order:
+**Render the action lines rather than typing them**, so that what the user reads
+and what §5's validator enforces come from the same field set. Add a field to
+`profile.schema.json` and it appears here without this document changing:
+
+```bash
+python3 - "$STATE" "$RUN_DIR" "$PROFILE" "$CLODEX_HOME/profile.schema.json" <<'PY'
+import json, subprocess, sys
+state, run_dir, profile_path, schema_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
+prof = json.load(open(profile_path))
+fields = sorted(k for k in
+                json.load(open(schema_path))["properties"]["actions"]["items"]["properties"]
+                if k != "id")
+for a in prof["actions"]:
+    print("  [%s] %s" % (a["id"], a["policy"].upper() if a["policy"] == "always-ask-exact"
+                         else a["policy"]))
+    for key in fields:
+        shown = a[key] if key in a else ("(the schema's empty value)" )
+        print("      %-9s %s" % (key + ":", json.dumps(shown) if key in a else shown))
+PY
+```
+
+Fill each `{braced}` word before you paste the line in — the message must show
+the string that will run. Then the message, in this shape and this order:
 
 ```
 Release authorization — run <run id>
@@ -553,13 +576,10 @@ Steps, in order:
  1 bookkeeping  write CHANGELOG.md (section below) and set package.json:version to 1.4.0
  2 commit       git commit -m "chore(release): v1.4.0" -- CHANGELOG.md package.json
  3 tag          git tag -a v1.4.0 -m "v1.4.0"   (on HEAD, which by then is step 2's commit)
- 4 push         [push-main] auto-with-authorization
-                argv:   git push origin main
-                cwd:    <repo root>   target: origin/main   env_refs: (none)
+ 4 push         <the rendered block for push-main, every field, verbatim>
  5 deploy       [deploy-prod] ALWAYS-ASK-EXACT — I will show this exact command again,
                 and ask again, immediately before it runs, every time it runs
-                argv:   <the literal filled argv, in full>
-                cwd:    <repo-relative dir>   target: production   env_refs: DEPLOY_TOKEN
+                <the rendered block for deploy-prod, every field, verbatim>
  6 verify-live  read-only checks, not an authorized action:
                 smoke: curl -fsS https://…/health | grep -q '"version":"1.4.0"'
 
@@ -577,13 +597,17 @@ Verification debt this release ships with — accepting these is part of this ap
 Commits in this release that no batch owns:
  4f21ab9 "fix: null guard in parser" (src/parser.ts) — <how it was disposed, in your words>
 
+Steps this repo's release has that I am NOT doing, and why:
+ deploy — <the reason, in your words>          (omit this block when there are none)
+
 Approve exactly these <N> actions and accept these <M> debt entries? Or name what to change.
 ```
 
 Rules that make this message the gate rather than a summary of one:
 
-- **Exact descriptors, not prose.** Each action shows `id`, the **filled** argv,
-  `cwd`, `target`, `env_refs`, and its policy — plus, for the `bookkeeping` step
+- **Exact descriptors, not prose.** Each profile-backed action shows `id`, its
+  policy, and **every field the profile schema defines**, rendered by the block
+  above rather than chosen by you — plus, for the `bookkeeping` step
   which runs no command, `writes` (the files), `version` (the number the user just
   settled), `tag` (the release tag, when this repo tags) and `changelog` (the
   exact text). Those four are how the manifest answers *"which version, which tag
@@ -682,6 +706,20 @@ exactly as shown and the debt items copied verbatim from `verification.debt`:
   **no `bookkeeping` descriptor and no `release-commit`** — §4's step list already
   prints that shape, and the validator expects their absence rather than merely
   tolerating it.
+- **Every step §4 computed has a descriptor, or is cut in writing.** The step
+  list is not advisory: it is derived from `version.source`, `changelog.path`,
+  `tag.enabled`, `deploy` and the remote, and the validator derives it again the
+  same way. A step that is in it and has no descriptor is the release quietly
+  losing a step — bookkeeping written, then never committed, tagged or pushed,
+  and §10 with nothing to notice it by. So a step you are not doing goes in the
+  payload as a `cut` entry with a reason:
+  ```json
+  "cut": [{"step": "deploy", "why": "the user cut deploy-prod at the gate"}]
+  ```
+  It is shown in the message under *"Steps this repo's release has that I am NOT
+  doing"*, and it is the same decision `skipped:` records at §10 — cut means
+  never authorized, skipped means authorized and not run. Neither is ever
+  inferred from a step simply being absent.
 - **Always pass `plan_hash`, recomputed from the file.** An approval against any
   other hash is refused: *"approval binds to plan hash 'X' but the current plan
   hash is 'Y'"*.
@@ -718,8 +756,11 @@ except (OSError, ValueError) as exc:
     die("cannot read %s: %s" % (profile_path, exc))
 try:
     ACTION = json.load(open(schema_path))["properties"]["actions"]["items"]
-except (OSError, ValueError, KeyError) as exc:
-    die("cannot read the action field set from %s: %s" % (schema_path, exc))
+    if not isinstance(ACTION.get("properties"), dict) or not ACTION["properties"]:
+        raise KeyError("properties")
+except (OSError, ValueError, KeyError, TypeError) as exc:
+    die("cannot read the action field set from %s: %s. Both gates key on that field set, so "
+        "there is nothing to check a descriptor against — fix the install." % (schema_path, exc))
 payload, problems = json.load(open(payload_path)), []
 
 # The field set comes from the SCHEMA, not from the keys this profile happened to
@@ -746,6 +787,37 @@ for key, spec in ACTION["properties"].items():
         FIELDSET[key] = ("no-empty-value", None)
 print("action fields the schema defines:", ", ".join(sorted(FIELDSET)))
 
+# §4's step list, derived again from the same five inputs. A step in it with no
+# descriptor is a step nothing downstream can notice the absence of: §10 keys
+# completeness on this same derivation, not on the descriptors that happen to
+# exist.
+src = prof["version"]["source"]
+cl = (prof.get("changelog") or {}).get("path")
+dep = prof["deploy"]
+try:
+    remote = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "@{upstream}"],
+                                     cwd=snap["repo"], stderr=subprocess.DEVNULL)
+    remote = remote.decode().strip().split("/")[0]
+except subprocess.CalledProcessError:
+    remote = (subprocess.check_output(["git", "remote"], cwd=snap["repo"]).decode().split() or [""])[0]
+STEP_LIST = []
+if src or cl:
+    STEP_LIST += ["bookkeeping", "commit"]
+if prof["tag"]["enabled"]:
+    STEP_LIST += ["tag"]
+if remote:
+    STEP_LIST += ["push"]
+if dep is not None and dep["trigger"] in ("auto-on-push", "manual-command"):
+    STEP_LIST += ["deploy"]
+if dep is not None and dep["verify_live"]:
+    STEP_LIST += ["verify-live"]
+# verify-live is reads, and an auto-on-push deploy runs no command (§7.5): those
+# two are steps without descriptors by design, and only those two.
+NEEDS_DESCRIPTOR = [st for st in STEP_LIST if st != "verify-live"
+                    and not (st == "deploy" and dep and dep["trigger"] == "auto-on-push")]
+print("steps this repo's release has:", ", ".join(STEP_LIST) or "(none)")
+print("of which need a descriptor:", ", ".join(NEEDS_DESCRIPTOR) or "(none)")
+
 book = [x for x in payload.get("actions", []) if x.get("id") == "bookkeeping"]
 values = {"version": (book[0].get("version") if book else None) or "",
           "tag": (book[0].get("tag") if book else None) or "",
@@ -771,6 +843,15 @@ def forbidden_shape(argv, tag):
         if "--" not in argv:
             problems.append("%s: `git commit` with no `--` pathspec commits the WHOLE index, "
                             "including work the user staged before the run (§2, §7.2)" % tag)
+        else:
+            # A pathspec is only a safety mechanism if it names the release files.
+            # `-- .` is a pathspec, and it takes the whole working tree.
+            given = argv[argv.index("--") + 1:]
+            want = [p for p in (cl, src) if p]
+            if sorted(given) != sorted(want):
+                problems.append("%s: the pathspec is %s but the release writes %s — a pathspec "
+                                "commit takes the working tree, so anything else in it lands "
+                                "unreviewed (§7.2)" % (tag, json.dumps(given), json.dumps(want)))
         if [a for a in argv if a in ("-a", "--all", "-am", "-a m")]:
             problems.append("%s: `git commit -a` stages every tracked file (§2)" % tag)
     if argv[:2] == ["git", "add"] and [a for a in argv if a in ("-A", "--all", ".")]:
@@ -823,10 +904,11 @@ for act in payload.get("actions", []):
     elif act.get("id") in LOCAL:
         # These three have no profile entry to be compared against, so their
         # shape is the only structural check they will ever get.
-        for f in ("id", "step", "argv", "cwd", "target", "env_refs", "policy"):
+        for f in ("id", "step") + tuple(sorted(FIELDSET)):
             if f not in act:
-                problems.append("%s: no %r — a local descriptor carries id, step, argv, cwd, "
-                                "target, env_refs and policy" % (tag, f))
+                problems.append("%s: no %r — a local descriptor carries id, step and every field "
+                                "the schema defines: %s"
+                                % (tag, f, ", ".join(sorted(FIELDSET))))
         if act.get("policy") != "auto-with-authorization":
             problems.append("%s: policy is %s — ship's own steps are exactly what this message "
                             "grants, so they are auto-with-authorization"
@@ -866,9 +948,33 @@ def at_start(path):
     except subprocess.CalledProcessError:
         return None
 
+# Every step this repo's release has, either descriptor-ed or cut in writing.
+have = {}
+for x in payload.get("actions", []):
+    have.setdefault(x.get("step"), []).append(x.get("id"))
+cut = {}
+for entry in payload.get("cut", []):
+    if not isinstance(entry, dict) or entry.get("step") not in STEP_LIST:
+        problems.append("cut entry %s names no step this release has (%s)"
+                        % (json.dumps(entry), ", ".join(STEP_LIST) or "none"))
+        continue
+    if not str(entry.get("why") or "").strip():
+        problems.append("cut entry for %r has no `why` — a step is not dropped without a reason"
+                        % entry["step"])
+        continue
+    cut[entry["step"]] = entry["why"]
+for st in NEEDS_DESCRIPTOR:
+    if st in have and st in cut:
+        problems.append("step %r is both described and cut — decide which" % st)
+    elif st not in have and st not in cut:
+        problems.append("step %r is in this repo's release (§4) but this authorization has no "
+                        "descriptor for it and no `cut` entry saying why not. A release that "
+                        "quietly loses a step writes its files and never commits them." % st)
+for st in cut:
+    if st not in NEEDS_DESCRIPTOR:
+        problems.append("step %r is cut, but it never needed a descriptor" % st)
+
 # A repo that writes nothing has nothing to book-keep and nothing to commit.
-src = prof["version"]["source"]
-cl = (prof.get("changelog") or {}).get("path")
 if not (src or cl):
     for x in payload.get("actions", []):
         if x.get("id") in ("bookkeeping", "release-commit"):
@@ -1046,8 +1152,11 @@ if left:
 try:
     ACTION = json.load(open(os.path.join(clodex_home, "profile.schema.json")))
     ACTION = ACTION["properties"]["actions"]["items"]
-except (OSError, ValueError, KeyError) as exc:
-    stop("cannot read the action field set from %s/profile.schema.json: %s" % (clodex_home, exc))
+    if not isinstance(ACTION.get("properties"), dict) or not ACTION["properties"]:
+        raise KeyError("properties")
+except (OSError, ValueError, KeyError, TypeError) as exc:
+    stop("cannot read the action field set from %s/profile.schema.json: %s — there is nothing to "
+         "check this descriptor against" % (clodex_home, exc))
 REQUIRED = set(ACTION.get("required", []))
 FIELDSET = {}
 for key, spec in ACTION["properties"].items():
@@ -1140,11 +1249,18 @@ printf 'rc=%s\n' "$RC"
   realistic case is a person editing it mid-release — and then the mismatch is
   the right answer, because what the user approved and what the repo now declares
   really have come apart. Take it to them; do not reconcile it yourself.
-- **Ship's own three ids are checked by nothing.** `bookkeeping`,
-  `release-commit` and `release-tag` have no profile entry to compare against, so
-  their argv is exactly what §5 wrote. That is the design — a repo does not
-  declare its own release commit — and it is why §7.2's guard and the pathspec
-  matter as much as they do.
+- **And know where the field set comes from.** Both gates read it from
+  `$CLODEX_HOME/profile.schema.json` — **skill-install state, not committed repo
+  state**. The repo's profile remains the authority on the *values*, but the
+  *set of fields compared* is trusted from the install, so a narrowed schema copy
+  narrows what is checked. It fails closed when that file is missing, unreadable,
+  or has no action properties; it cannot detect a deliberately shortened one.
+- **Ship's own three ids have no profile entry**, so `bookkeeping`,
+  `release-commit` and `release-tag` are checked for shape rather than against a
+  declaration: §5 requires every schema field plus `step`, forbids §2's argv
+  shapes, and requires the release commit's pathspec to be exactly the release
+  files. That is the design — a repo does not declare its own release commit —
+  and it is why §7.2's guard and the pathspec matter as much as they do.
 
 **Read `rc` before you read anything else, because it says whether the world
 changed:**
@@ -1249,7 +1365,8 @@ way:
 
 The compare holds you to whichever it is: with a pre-release state it checks that
 the file is that state plus exactly the authorized edit, and without one it checks
-the file against the authorized content byte for byte. A header you invent at
+the file against the authorized content line by line, ignoring blank lines and
+trailing whitespace. A header you invent at
 writing time but never showed the user reads as somebody else's edit either way,
 which is the point.
 
@@ -1707,7 +1824,7 @@ wired for automated deploys. All of these are it:
 
 ```json
 {"e": "release:updated", "state": "not-deployed",
- "deployed": "skipped: deploy | the user cut deploy-prod from the release authorization; this repo's deploy trigger is manual-command"}
+ "deployed": "skipped: deploy, verify-live | the user cut deploy-prod from the release authorization; this repo's deploy trigger is manual-command"}
 ```
 
 `deployed` carries the reason, so the manifest answers "why isn't this live?"
@@ -1719,7 +1836,10 @@ skipped: <step>, <step> | <why, in your own words>
 ```
 
 Step names from §6's six, comma-separated, then a `|`, then the sentence. §10
-reads that list and nothing else. It used to accept the step name appearing
+reads that list and nothing else — and it reads it against **every step this
+repo's release has**, so cutting the deploy cuts the live check with it and both
+names belong in the list. A step you do not name is a step §10 says never
+completed. It used to accept the step name appearing
 anywhere in the prose, which let *"the push-button deploy dashboard was green"*
 account for a `push` that never happened — a sentence, not a declaration. Then
 close (§10).
@@ -1737,13 +1857,13 @@ was already done — a release abandoned after the tag step still has the tag.
 
 ## 10. Exit
 
-Run it from the repo root. It answers, from the manifest alone, whether this
-stage did what it claims:
+Run it from the repo root. It answers, from the manifest and the profile,
+whether this stage did what it claims:
 
 ```bash
-python3 - "$STATE" "$RUN_DIR" <<'PY'
+python3 - "$STATE" "$RUN_DIR" "$PROFILE" <<'PY'
 import json, re, subprocess, sys
-state, run_dir = sys.argv[1], sys.argv[2]
+state, run_dir, profile_path = sys.argv[1], sys.argv[2], sys.argv[3]
 snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
 rel, blockers = snap["release"], []
 TERMINAL, RESUMABLE = ("verified-live", "not-deployed", "abandoned"), ("push-failed", "deploy-failed")
@@ -1774,15 +1894,39 @@ if rel["state"] != "abandoned" or rel["steps"]:
 # a descriptor with no `step` — or one outside the six names — is itself a
 # blocker rather than a descriptor with nothing to check.
 STEPS = ("bookkeeping", "commit", "tag", "push", "deploy", "verify-live")
-authorized = set()
 for a in auth:
     for x in a["actions"]:
-        if x.get("step") in STEPS:
-            authorized.add(x["step"])
-        else:
+        if x.get("step") not in STEPS:
             blockers.append("descriptor %r has step %r, which is not one of %s — the completeness "
                             "check below cannot see it" % (x.get("id"), x.get("step"), ", ".join(STEPS)))
-authorized = sorted(authorized)
+
+# Completeness is keyed on the steps THIS REPO'S RELEASE HAS, derived from the
+# profile exactly as §4 and §5 derive them — not on the descriptors that happen
+# to exist. Keyed on the descriptors, an authorization that silently omitted the
+# commit, tag and push steps would print SHIP COMPLETE for a release whose files
+# were written and then left dirty in the tree.
+try:
+    prof = json.load(open(profile_path))
+except (OSError, ValueError) as exc:
+    raise SystemExit("NOT DONE — cannot read %s: %s" % (profile_path, exc))
+try:
+    remote = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "@{upstream}"],
+                                     cwd=snap["repo"], stderr=subprocess.DEVNULL)
+    remote = remote.decode().strip().split("/")[0]
+except subprocess.CalledProcessError:
+    remote = (subprocess.check_output(["git", "remote"], cwd=snap["repo"]).decode().split() or [""])[0]
+dep = prof["deploy"]
+authorized = []
+if prof["version"]["source"] or (prof.get("changelog") or {}).get("path"):
+    authorized += ["bookkeeping", "commit"]
+if prof["tag"]["enabled"]:
+    authorized += ["tag"]
+if remote:
+    authorized += ["push"]
+if dep is not None and dep["trigger"] in ("auto-on-push", "manual-command"):
+    authorized += ["deploy"]
+if dep is not None and dep["verify_live"]:
+    authorized += ["verify-live"]
 done_steps = {s["step"] for s in rel["steps"] if s["status"] == "done"}
 # The escape hatch is an explicit list, not prose: `deployed` may begin
 # "skipped: <step>, <step> | <why>". Substring-matching a sentence let
@@ -1790,8 +1934,8 @@ done_steps = {s["step"] for s in rel["steps"] if s["status"] == "done"}
 dep = rel.get("deployed")
 m = re.match(r"^skipped:\s*([^|]*)\|", dep) if isinstance(dep, str) else None
 skipped = {s.strip() for s in m.group(1).split(",")} & set(STEPS) if m else set()
-print("authorized steps:", authorized or "(none)", "| done:", sorted(done_steps) or "(none)",
-      "| declared skipped:", sorted(skipped) or "(none)")
+print("steps this release has:", authorized or "(none)", "| done:",
+      sorted(done_steps) or "(none)", "| declared skipped:", sorted(skipped) or "(none)")
 
 open_f = [f["id"] for f in snap["findings"] if f["disposition"] == "open"]
 print("open findings:", " ".join(open_f) or "(none)")
@@ -1804,15 +1948,18 @@ print("stage:", snap["stage"])
 if rel["state"] in TERMINAL:
     if snap["stage"] != "closed":
         blockers.append("state %r is terminal but the run is not closed — append run:closed" % rel["state"])
-    # Terminal means finished, so every authorized action either ran or the
-    # release state says why not. Without this a run that authorized a push,
-    # tagged, and never pushed prints SHIP COMPLETE — the exact failure the
-    # release state machine exists to prevent. (A resumable run is unfinished by
-    # definition, so the same check there would be noise.)
-    for st in authorized:
+    # Terminal means finished, so every step this repo's release has either ran
+    # or the release state says why not. Without this a run that tagged and never
+    # pushed prints SHIP COMPLETE — the exact failure the release state machine
+    # exists to prevent. (A resumable run is unfinished by definition, so the
+    # same check there would be noise.)
+    # A release called off before anything ran owes no per-step account; one that
+    # started does, for every step this repo's release has.
+    for st in (authorized if (rel["state"] != "abandoned" or rel["steps"]) else []):
         if st not in done_steps and st not in skipped:
-            blockers.append("authorized step %r never completed and `deployed` does not declare it "
-                            "skipped — say  skipped: %s | <why>  there" % (st, st))
+            blockers.append("step %r is part of this repo's release and never completed, and "
+                            "`deployed` does not declare it skipped — say  skipped: %s | <why>  "
+                            "there" % (st, st))
 elif rel["state"] in RESUMABLE:
     if snap["stage"] == "closed":
         blockers.append("state %r is resumable but the run was closed" % rel["state"])
