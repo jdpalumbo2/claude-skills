@@ -311,12 +311,21 @@ Non-destructive: never regenerate the file wholesale, never drop `notes`.
 4. **Write, validate, commit.** Write every required key — the schema requires
    `runtimes` and `required_env` (use `[]` for "none", never omit them) and every
    key of `commands` including `install`, precisely so preflight checks 4 and 6
-   have something to check. Re-run the validator above, then commit by explicit
-   path, because the tree may hold the user's unrelated work:
+   have something to check. Re-run the validator above, then commit **by
+   pathspec**, because the tree — and the index — may hold the user's unrelated
+   work:
    ```bash
-   git add .clodex/profile.json && git commit -m "chore(clodex): repo profile"
+   git add .clodex/profile.json && git commit -m "chore(clodex): repo profile" -- .clodex/profile.json
    ```
-   Never `git add -A`, `git add .`, or `git commit -a`. Ever.
+   The trailing `-- .clodex/profile.json` is the load-bearing part. A bare
+   `git commit -m` commits **everything already staged**, so anything the user or
+   another tool had in the index rides along inside a commit labelled as a
+   profile write. With the pathspec, the commit can hold only that one file and
+   the rest of the index is left exactly as it was. The `git add` is still
+   required — a pathspec cannot name a file git does not yet know about.
+
+   This is the only commit this skill makes. Never `git add -A`, `git add .`, or
+   `git commit -a`. Ever.
 5. **`notes` is inert.** It is free-form text for humans and nothing in clodex
    reads it. Anything that must change what clodex *does* goes in a typed field.
 
