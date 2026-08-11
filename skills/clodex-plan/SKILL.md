@@ -1,6 +1,6 @@
 ---
 name: clodex-plan
-description: Use when the clodex router hands off a run at stage `open` or `plan`, when a run's snapshot shows no recorded plan or a plan with no standing approval, when review findings need dispositions before work can start, or when someone asks to plan a feature in a repo that already has a `.clodex/` run directory.
+description: Use when the clodex router hands off a run at stage `open` or `plan`, when a run the router resumed shows no recorded plan or a plan with no standing approval, or when plan-review findings on such a run still need dispositions before work can start.
 ---
 
 # clodex-plan — ground, decide, get an approved plan
@@ -21,8 +21,8 @@ When those exist, the plan is approved and `clodex-build` can start.
 
 **Where this stage ends.** You declare *owned paths* and *done when* per batch.
 `clodex-build` composes the full batch contract from them (forbidden paths,
-test expectations) and executes. You never write code, never open a batch, never
-commit anything but the profile.
+test expectations) and executes. You never write code, never open a batch, and
+**never commit anything at all** — `clodex-ship` commits run-owned paths.
 
 You arrive here from `clodex`, which owns preflight, the profile, lane
 classification, the change boundary, and the run directory. If you were invoked
@@ -38,8 +38,9 @@ CLODEX_HOME="${CLODEX_HOME:-$HOME/.claude/skills/clodex}"   # the router's dir, 
 STATE="$CLODEX_HOME/state/clodex_state.py"
 RUNNER="$CLODEX_HOME/runner/run-codex.sh"
 RUN_DIR="<the absolute run dir the router handed you>"
-REPO="$(python3 "$STATE" rebuild "$RUN_DIR" |
-        python3 -c 'import json,sys;print(json.load(sys.stdin)["repo"])')"
+SNAP="$(python3 "$STATE" rebuild "$RUN_DIR")"
+REPO="$(printf '%s' "$SNAP" | python3 -c 'import json,sys;print(json.load(sys.stdin)["repo"])')"
+PLAN="$(printf '%s' "$SNAP" | python3 -c 'import json,sys;print(json.load(sys.stdin)["plan"]["path"] or "")')"
 cd "$REPO"
 PROFILE="$REPO/.clodex/profile.json"
 ```
@@ -47,6 +48,10 @@ PROFILE="$REPO/.clodex/profile.json"
 Shell variables do not survive between command invocations — **re-establish this
 block at the top of every shell you run these procedures in.** Everything below
 runs from `$REPO`.
+
+`$PLAN` is empty until §6 records a plan; after that it is whatever the manifest
+says, never a path you remember. §8 hands it to the runner, so a shell that
+skipped this block passes `--input ''` and dies with usage error 64.
 
 Engine verbs, payload on **stdin**:
 
@@ -80,21 +85,29 @@ python3 "$STATE" status "$RUN_DIR"
 - `stage: plan` → a previous session already entered. **Do not append it again.**
   Read the manifest and pick up from the table below.
 - Anything later (`build`, `verify`, `ship`, `closed`) → you are in the wrong
-  stage; hand back to `clodex`.
+  stage. Say so and hand back, in these words: *"clodex, run dir
+  `<the absolute run dir>` — this run is at stage `<stage>`, not plan."* The
+  router owns picking the right stage skill; do not pick one yourself.
 
-**Resume map** — read `python3 "$STATE" rebuild "$RUN_DIR"` and match the first
-row that is true:
+**Resume map** — read the manifest (`python3 "$STATE" rebuild "$RUN_DIR"`) **and
+the plan file it points at** in `plan.path`. Match the first row that is true:
 
-| Manifest shows | You are | Go to |
+| What you find | You are | Go to |
 |---|---|---|
 | `plan.hash` is `null` | nothing written yet | §2 |
-| plan recorded, its `Direction gate:` line says `yes`, and no un-revoked `approvals` entry has `scope: "direction"` on the current hash | premise not yet approved | §7 |
+| plan recorded, the plan file's `Direction gate:` line says `yes`, and `approvals` has no entry with `scope: "direction"` — **ever, revoked or not** | premise never approved | §7 |
 | any `findings` entry with `disposition: "open"` | mid review loop | §9 (dispose what is open), then §8 for the next round |
-| all findings disposed, no un-revoked `plan:approved` on the current hash | ready to ask | §10 |
-| an un-revoked approval with `scope: "plan"` on the current hash | approved | §11 |
+| all findings disposed, and no un-revoked `approvals` entry with `scope: "plan"` on the current hash | ready to ask | §10 |
+| an un-revoked `approvals` entry with `scope: "plan"` on the current hash | approved | §11 |
 
-An approval whose `revoked` is non-null does not count. An amendment revoked it
-on purpose; the plan needs approving again.
+Row 2 asks whether a direction approval was **ever** granted, not whether one
+stands. Every amendment revokes it, including one that only fixed a review
+finding — so testing for a *standing* one would re-present the premise after
+every revision. A revoked direction approval is re-granted inside the single
+approval message (§7, §10), not at its own gate.
+
+An approval whose `revoked` is non-null does not count anywhere else. An
+amendment revoked it on purpose; the plan needs approving again.
 
 ---
 
@@ -125,23 +138,17 @@ Then, in this order:
 3. **Find the pattern this repo already uses** for the thing you are about to
    add. Reinventing one is a finding the reviewer will hand back.
 
-`plans_dir` unset or `null` → use `docs/plans`, say so in one line, and record it
-so the next run does not re-ask:
+`plans_dir` unset or `null` → use the conventional default `docs/plans/`, tell
+the user once — *"this repo's profile has no `docs.plans_dir`; I am using
+`docs/plans/`, and you may want to add the key"* — and carry on.
 
-```bash
-python3 - "$PROFILE" <<'PY'
-import json, sys
-path = sys.argv[1]
-p = json.load(open(path))
-p.setdefault("docs", {})["plans_dir"] = "docs/plans"
-json.dump(p, open(path, "w"), indent=2)
-open(path, "a").write("\n")
-PY
-git add .clodex/profile.json && git commit -m "chore(clodex): record docs.plans_dir"
-```
-
-That is the only commit this stage makes, and it stages one explicit path. Never
-`git add -A`, `git add .`, or `git commit -a`.
+**Do not write the profile and do not commit it.** `.clodex/profile.json` is
+committed state that this stage does not own: `git add` stages the whole file, so
+a pre-existing edit to `commands`, or a stale-profile repair the router made
+without committing, would ride along inside a clodex commit — exactly the
+file-level provenance the change boundary exists to protect. It would also commit
+to whatever branch is checked out, ignoring the profile's own `branch` rule.
+This stage makes **no commits at all**.
 
 ---
 
@@ -284,7 +291,7 @@ The plan hash is the **sha256 of the plan file's bytes**. Compute it after the
 file is final and before you append:
 
 ```bash
-PLAN="docs/plans/<file>.md"
+PLAN="<plans_dir>/<the plan file you just wrote>.md"    # then keep it in $PLAN (§0)
 python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PLAN"
 ```
 
@@ -294,26 +301,51 @@ python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read(
 
 ```json
 {"e": "plan:recorded", "version": 1,
- "path": "docs/plans/2026-08-11-thing.md",
+ "path": "<plans_dir>/<plan file>.md",
  "hash": "<sha256>"}
 ```
 
 **Every revision after that is `plan:amended`, never a second `plan:recorded`.**
 A second `plan:recorded` with a different hash is refused: *"a plan is already
 recorded; supersede it with plan:amended"*. Bump the version, carry a real new
-hash different from the one it supersedes, and say what re-review it needs:
+hash different from the one it supersedes, and declare what re-review it needs:
 
 ```json
 {"e": "plan:amended", "version": 2,
- "path": "docs/plans/2026-08-11-thing.md",
+ "path": "<plans_dir>/<plan file>.md",
  "hash": "<new sha256>",
  "note": "fixed r1-F001: batch 2 owned paths were missing the migration",
- "required_review": ["plan-review"]}
+ "required_review": ["plan-reviewer"]}
 ```
+
+### Material or immaterial — the test that fills `required_review`
+
+An amendment is **material** when it touches any of: **Brief · Scope** (including
+the top-level *Done when*) **· Batches** (any owned path, any batch *Done when*)
+**· Evidence · Direction**. An amendment that changes none of those — wording,
+formatting, a clarification that adds no new claim — is **immaterial**. That is
+the whole test; there is no third category and no judgment beyond reading which
+sections the diff touched.
+
+| | `required_review` | The review loop | Approval |
+|---|---|---|---|
+| **material** | `["plan-reviewer"]` | **re-opens** — it needs a `complete` round against the new hash (§8) | approve again, on the new hash |
+| **immaterial** | `[]` | **stays converged** — nothing the last round examined changed | approve again, on the new hash |
+
+Either way the hash moved, so the plan must be approved again. There is no
+amendment that costs nothing.
+
+**Do not invent values for `required_review`.** It names Codex **roles**, and the
+vocabulary is fixed outside this skill: `properties.role.enum` in
+`$CLODEX_HOME/runner/envelope.schema.json` — `plan-reviewer`, `implementer`,
+`code-reviewer`, `advisor`. The same enum names a finding's `source` (§9), so the
+whole run uses one set of names. `clodex-ship` is blocked until every declared
+re-review exists against the current hash, so a `["plan-reviewer"]` you never
+satisfy is a run that cannot ship.
 
 An amendment revokes every approval bound to the superseded hash. Inside this
 stage, before approval, that revokes nothing — which is exactly why revising
-during the review loop is free and revising after approval is not.
+during the review loop is cheap and revising after approval is not.
 
 ---
 
@@ -338,10 +370,10 @@ amendment revoked the old direction approval mechanically; the new one binds to
 the new hash.
 
 Every later amendment revokes this approval too, including ones that only fixed
-a review finding. Do **not** run a second checkpoint for those: re-run the
-checkpoint only when the `## Direction` section itself changed. Otherwise
-re-grant the approval on the final hash inside the single approval message
-(§10) — same gate, one message.
+a review finding. **Run the checkpoint a second time only when the `## Direction`
+section itself changed** — that is the same materiality test as §6, narrowed to
+one section. For every other amendment, re-grant the approval on the final hash
+inside the single approval message (§10). Same gate, one message.
 
 ---
 
@@ -354,18 +386,20 @@ and it is not skipped because the ask was small.
 
 Write the prompt to a file (never a shell string):
 
-`$RUN_DIR/plan-review-r1.prompt.md`
+`$RUN_DIR/plan-review-r<N>.prompt.md` — `<N>` is the round number.
+
+Everything in angle brackets below is a placeholder to fill in, not literal text:
 
 ```markdown
 You are reviewing an implementation plan before any code is written. The repo
 root is your working directory; read whatever you need.
 
-Plan: docs/plans/2026-08-11-thing.md
+Plan: <the value of $PLAN>
 
 The ask it must satisfy, verbatim:
-<brief>
+<brief, from the manifest>
 
-Round: 1
+Round: <N>
 
 Check, in this order:
 1. Does the plan satisfy the ask? Name anything asked for that no batch delivers.
@@ -387,10 +421,11 @@ low/info for improvements. Return an empty findings list if you find nothing.
 Run it:
 
 ```bash
+PROMPT="$RUN_DIR/plan-review-r1.prompt.md"     # r2, r3 on later rounds
 OUT="$(bash "$RUNNER" --role plan-reviewer --repo "$REPO" \
-        --prompt-file "$RUN_DIR/plan-review-r1.prompt.md" --input "$PLAN")"; RC=$?
+        --prompt-file "$PROMPT" --input "$PLAN")"; RC=$?
 printf 'rc=%s line=%s\n' "$RC" "$OUT"
-ENVELOPE="${OUT##* }"
+ENVELOPE="${OUT#* }"     # strip the FIRST word only — a repo path may contain spaces
 ```
 
 The runner prints one line, `"<status> <envelope-path>"`, and its exit code is
@@ -423,10 +458,36 @@ PY
 `reviewed this exact plan: False` means the file changed under the reviewer.
 That round is stale — discard it and run a new one.
 
-**Convergence.** The loop ends when a `complete` round against the **current**
-plan hash returns **no blocker, high, or medium findings**. `low` and `info`
-findings do not buy another round; record and dispose them (§9) and carry them
-into the approval message.
+**Convergence — measured on findings you have not already disposed.** A round
+converges when all three hold:
+
+1. it is `complete`, and
+2. it hashed the current plan (`reviewed this exact plan: True`), and
+3. every blocker/high/medium finding it returned is a **restatement of one
+   already disposed** as `accepted` or `rejected`.
+
+Zero blocker/high/medium findings is the ordinary case and satisfies (3)
+vacuously. A round that re-reports a finding the user already accepted is
+**also converged** — that finding has an answer.
+
+Convergence is defined this way because the alternative cannot terminate. An
+accepted-but-unfixed finding is still in the plan by construction, so every
+later round reports it again; a rule keyed to what a round *returns* would loop
+forever on exactly the findings the user already settled. Match a returned
+finding to a disposed one by **what it says**, not by id — the reviewer mints
+fresh ids every invocation. When it matches, record and dispose it the same way
+with `"note": "restates r1-F002"` (§9); it does not buy another round.
+
+`low` and `info` findings never buy a round either, whatever they say. Record
+and dispose them, and carry anything unresolved into the approval message.
+
+**A `fixed` disposition re-opens the loop only when its amendment is material**
+(§6). Fixing a wording nit is immaterial: the hash moves, you approve against
+the new one, and the converged round still stands because nothing it examined
+changed. Fixing an owned path, a *Done when*, an evidence class, or the scope is
+material: run another round against the new hash before asking for approval.
+Without this rule, disposing a single `info` finding as `fixed` would silently
+void the convergence you just reached.
 
 Each round after an amendment is a **new invocation**, not `--resume`: the
 artifact changed and the envelope must hash the new file. `--resume` exists only
@@ -434,10 +495,14 @@ to finish a `partial` or `interrupted` invocation. Give round N's prompt the
 history so the reviewer is not re-deriving it:
 
 ```markdown
-Round: 2. The plan changed since your last review.
+Round: <N>. The plan changed since your last review.
 - r1-F001 (high) <summary> — fixed: <what changed in the plan>
 - r1-F003 (medium) <summary> — rejected: <the user's reason>
-Re-check those and report anything still wrong or newly introduced.
+- r1-F004 (blocker) <summary> — ACCEPTED by the user, deliberately not fixed:
+  <their reason>
+Re-check the fixes and report anything still wrong or newly introduced. You may
+flag the accepted item again; it is decided, and reporting it will not change
+the plan.
 ```
 
 **When the reviewer keeps finding new things.** Cap the loop at **3 rounds**.
@@ -456,9 +521,12 @@ dispositions, or re-scope the plan and start the loop over from round 1.
 Record each finding from a `complete` round **before** acting on it:
 
 ```json
-{"e": "finding:recorded", "id": "r1-F001", "source": "plan-review",
+{"e": "finding:recorded", "id": "r1-F001", "source": "plan-reviewer",
  "severity": "high", "summary": "<one line, verbatim from the envelope>"}
 ```
+
+`source` is the Codex **role** that produced it, from the same fixed enum that
+`required_review` draws on (§6): `plan-reviewer` here, always.
 
 **Namespace the id by round.** Envelope ids (`F001`, `F002`, …) are unique only
 within one invocation, so round 2's `F001` collides with round 1's and the
@@ -469,7 +537,7 @@ dispositions — nothing is dropped, and "we talked about it" is not a state:
 
 | Disposition | Means | Who decides |
 |---|---|---|
-| `fixed` | the plan was changed to address it — so this implies an amendment (§6) and a new hash | you |
+| `fixed` | the plan was changed to address it — so this implies an amendment (§6) and a new hash, and §6's materiality test decides whether the review loop re-opens | you |
 | `accepted` | legitimate, and the user chose not to act on it. It stands as a known risk and **survives into ship** | the user, explicitly |
 | `rejected` | wrong — the reviewer misread the repo or the ask | the user, explicitly |
 
@@ -518,10 +586,20 @@ plan hash, so the user is approving that argument too. **At least one class is
 required**, whatever the profile's defaults are: a plan declaring no evidence is
 a plan with no definition of done.
 
-The reducer appends to `verification.declared` without de-duplicating. Declare
-early and then amend, and stale classes from a superseded version stay in the
-manifest forever. `clodex-verify` reads this list; do not describe or pre-empt
-what it does with it.
+The reducer appends to `verification.declared` without de-duplicating, so two
+things are on you. Declaring early and then amending leaves stale classes from a
+superseded version in the manifest forever — hence "declare last". And a session
+that died between these appends and `plan:approved` already declared some of
+them, so on resume **append only the classes not already there**:
+
+```bash
+python3 "$STATE" rebuild "$RUN_DIR" |
+  python3 -c 'import json,sys;print(" ".join(sorted({d.get("class") for d in json.load(sys.stdin)["verification"]["declared"]})))'
+```
+
+Anything that command prints is done. Declare the rest.
+
+`clodex-verify` reads this list; do not describe or pre-empt what it does with it.
 
 **The approval message** — one message, and for most runs the only gate this
 stage spends:
@@ -542,19 +620,18 @@ amendments revoked the earlier direction approval — `approval:granted` with
  "plan_version": 3, "plan_hash": "<sha256, recomputed from the file>"}
 ```
 
-On no: if they asked for a change, revise, amend (§6), re-review when the change
-is material, and re-ask. If the work should not go ahead at all, hand back to
-`clodex` — it owns closing and abandoning a run, and this stage never does.
+On no: if they asked for a change, revise, amend (§6), re-open the review loop
+when §6's materiality test says the amendment is material, and re-ask. If the
+work should not go ahead at all, hand back to `clodex` — it owns closing and
+abandoning a run, and this stage never does.
 
-**Always pass `plan_hash` explicitly, recomputed from the file on disk** — not
-copied from an earlier round. The reducer only refuses a hash it has never seen
-(*"approval references unknown plan hash"*), which catches an edited-but-
-unrecorded file. It does **not** catch a hash that is merely superseded: a hash
-from before an amendment is still a known hash, so an approval bound to it is
-accepted and reads `revoked: null` forever — the revocation sweep runs at
-amendment time and never revisits approvals appended afterwards. That approval
-looks valid and approves nothing. The only defence is recomputing, and the
-`plan_hash == plan.hash` test below.
+**Always pass `plan_hash` explicitly, recomputed from the file on disk.** The
+reducer accepts an approval only against the **current** `plan.hash`; anything
+else — a hash you copied from an earlier round, or the hash of a file you edited
+without amending — is refused with *"approval binds to plan hash 'X' but the
+current plan hash is 'Y'"*. Both mistakes fail loudly at append time, and the fix
+for both is the same: amend first (§6) if the file really did change, then
+approve the hash you actually have.
 
 ### What "approved" means, exactly
 
@@ -564,11 +641,16 @@ three** hold — and this is answerable from the manifest alone:
 1. `plan.hash` is non-null.
 2. `approvals` contains an entry with `scope: "plan"`, `plan_hash` equal to
    `plan.hash`, and `revoked: null`.
-3. No entry in `findings` with `source: "plan-review"` has
+3. No entry in `findings` with `source: "plan-reviewer"` has
    `disposition: "open"`. Every one is `fixed`, `accepted`, or `rejected`.
 
 Plus, when the direction gate was **yes**, a fourth: an `approvals` entry with
 `scope: "direction"`, the same `plan_hash`, and `revoked: null`.
+
+Fact 2's equality is now also an engine guarantee — an approval can only be
+appended against the current hash — so a `revoked: null` approval is necessarily
+on `plan.hash`. Keep testing it anyway: it is the clearest statement of the rule,
+and it costs one comparison.
 
 None of these is a feeling, and none of them is "the user seemed happy." If any
 is missing, the plan is not approved.
@@ -576,7 +658,8 @@ is missing, the plan is not approved.
 **A separate question:** is the file on disk still the approved plan? Recompute
 the sha256 of `plan.path` and compare it to `plan.hash`. Different means someone
 edited the file without amending — append `plan:amended` (which revokes the
-approval), re-review if the change is material, and approve again.
+approval), re-open the review loop if §6's test calls the change material, and
+approve again.
 
 ---
 
@@ -602,8 +685,11 @@ file or in the log, or it does not exist.
 | Reusing envelope finding ids across rounds | Refused: *"finding 'F001' already recorded"*. Namespace them `r<N>-F001`. |
 | Treating a `partial` envelope's findings as the review | Only a `complete` round counts. Resume with the command the runner printed. |
 | Starting a fresh round to recover from an interruption | `--resume <invocation-id>` finishes the interrupted one. Fresh rounds are for a changed plan. |
-| Approving after editing the plan file | The reducer refuses the unknown hash. Amend, then approve. |
-| Declaring evidence right after recording the plan | Amendments leave stale classes in `verification.declared`. Declare immediately before `plan:approved`. |
+| Approving against any hash but the current one — a copied one, or the hash of a file you edited without amending | Refused: *"approval binds to plan hash 'X' but the current plan hash is 'Y'"*. Amend if the file changed, then approve `plan.hash`. |
+| Looping forever because the reviewer keeps re-reporting a finding the user accepted | Convergence is measured on findings **not already disposed** (§8). A round that only restates disposed findings has converged. |
+| Letting a `fixed` typo-grade finding void a converged round, or re-reviewing after every wording change | §6's materiality test decides: material ⇒ `required_review: ["plan-reviewer"]` and another round; immaterial ⇒ `[]` and no round. Either way, re-approve — the hash moved. |
+| Committing the profile to record `docs.plans_dir` | This stage makes no commits. Use `docs/plans/`, say so once, move on (§2). |
+| Declaring evidence right after recording the plan, or re-declaring on resume | Amendments leave stale classes in `verification.declared`, and the reducer does not de-dup. Declare immediately before `plan:approved`, and only the classes not already declared (§10). |
 | Asking a question a file answers | Ground first (§2). Only blocking or decision-bearing questions reach the user. |
 | Running the direction checkpoint for a data or refactor change | The gate is a predicate (§4), not a mood. `no` means no checkpoint. |
 | Marking a finding `accepted` because it seemed minor | Only the user accepts or rejects a finding. Propose it in the approval message. |
