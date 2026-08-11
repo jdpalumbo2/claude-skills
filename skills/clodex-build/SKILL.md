@@ -200,16 +200,47 @@ python3 - "$STATE" "$RUN_DIR" "src/thing/" "docs/plans/<plan file>.md" <<'PY'
 import json, subprocess, sys
 state, run_dir, owned = sys.argv[1], sys.argv[2], sys.argv[3:]
 snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
-dirty = snap["git"]["dirty_at_start"]
-hits = sorted({d for d in dirty for o in owned
-               if d == o or d.startswith(o.rstrip("/") + "/")})
-print("dirty at start:", " ".join(dirty) or "(clean tree)")
+
+def under(path, prefix):                  # path IS prefix, or sits inside it
+    return path == prefix.rstrip("/") or path.startswith(prefix.rstrip("/") + "/")
+
+def tree():                               # every path git reports right now
+    raw = subprocess.check_output(
+        ["git", "status", "--porcelain", "-z", "--untracked-files=all"]).decode()
+    fields, i, out = raw.split("\0"), 0, []
+    while i < len(fields) and fields[i]:
+        entry = fields[i]; i += 1
+        out.append(entry[3:])
+        if entry[0] in ("R", "C"):
+            out.append(fields[i]); i += 1     # a rename's origin path
+    return out
+
+# A directory-shaped entry hides every file under it — expand it before comparing.
+dirty, current = [], tree()
+for d in snap["git"]["dirty_at_start"]:
+    inside = [p for p in current if under(p, d)] if d.endswith("/") else []
+    dirty.extend(inside or [d])
+
+hits = sorted({d for d in dirty for o in owned if under(d, o) or under(o, d)})
+print("dirty at start:", " ".join(snap["git"]["dirty_at_start"]) or "(clean tree)")
+print("resolved to:   ", " ".join(sorted(set(dirty))) or "(nothing)")
 print("overlap:       ", " ".join(hits) if hits else "(none)")
 PY
 ```
 
 Pass every owned path of every batch as an argument — an overlap the second batch
 will hit is still an overlap.
+
+**Overlap is tested in both directions, and directory entries are expanded, on
+purpose.** An acknowledged entry can be an **ancestor** of an owned path:
+`dirty_at_start` of `["docs/"]` against an owned `docs/plans/` is an overlap,
+because the user's `docs/plans/older-draft.md` sits inside a path this run is
+about to stage. A test that only asks "is the dirty path inside an owned path"
+answers `(none)` there, and their file lands in a clodex commit with nothing
+downstream noticing. The current router records the dirty snapshot file by file,
+so this should not arise — but a run opened by an older version, or any
+regression upstream, must not silently re-open it, which is why the check does
+not trust the shape of what it was handed.
 
 - **`overlap: (none)`** → proceed to §4. The other dirty paths are not yours:
   never stage them, never revert them, never mention them in a contract except as
@@ -392,56 +423,91 @@ python3 - "$STATE" "$RUN_DIR" "src/thing/" "docs/plans/<plan file>.md" <<'PY'
 import json, subprocess, sys
 state, run_dir, owned = sys.argv[1], sys.argv[2], sys.argv[3:]
 snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
-acknowledged = set(snap["git"]["dirty_at_start"])
+acknowledged = snap["git"]["dirty_at_start"]
+
+def under(path, prefix):
+    return path == prefix.rstrip("/") or path.startswith(prefix.rstrip("/") + "/")
+
+def ack(path):        # an acknowledged DIRECTORY covers every file inside it
+    return any(under(path, d) for d in acknowledged)
+
 raw = subprocess.check_output(
     ["git", "status", "--porcelain", "-z", "--untracked-files=all"]).decode()
 fields, i, stray = raw.split("\0"), 0, []
 while i < len(fields) and fields[i]:
     entry = fields[i]; i += 1
-    xy, path = entry[:2], entry[3:]
-    if xy[0] in ("R", "C"):        # rename/copy: the origin path is its own field
-        i += 1
-    if any(path == o or path.startswith(o.rstrip("/") + "/") for o in owned):
-        continue
-    stray.append((path, path in acknowledged))
-for path, ack in sorted(stray):
-    print("OUTSIDE  %-38s %s" % (path, "acknowledged dirt" if ack else "NOT owned by this batch"))
-unexplained = [p for p, ack in stray if not ack]
+    paths = [entry[3:]]
+    if entry[0] in ("R", "C"):
+        paths.append(fields[i]); i += 1   # the origin too: a move OUT of an unowned path counts
+    for p in paths:
+        if not any(under(p, o) for o in owned):
+            stray.append((p, ack(p)))
+for path, acked in sorted(set(stray)):
+    print("OUTSIDE  %-38s %s" % (path, "acknowledged dirt — leave it alone" if acked
+                                 else "NOT owned by this batch"))
+unexplained = sorted({p for p, acked in stray if not acked})
 print("clean — the contract held" if not unexplained
       else "STOP — %d path(s) the contract does not allow: %s"
            % (len(unexplained), " ".join(unexplained)))
 PY
 ```
 
-Pass this batch's owned paths only. `--untracked-files=all` is not optional:
-plain `git status --porcelain` collapses an untracked directory to `docs/`, so a
-new file at an owned path — the plan file, most runs — reads as a stray and the
-check cries wolf on its first use. What comes back:
+Pass this batch's owned paths only. Three things in that snippet are load-bearing
+and none of them is decoration:
+
+- **`--untracked-files=all`.** Plain `git status --porcelain` collapses an
+  untracked directory to `docs/`, so a new file at an owned path — the plan file,
+  most runs — reads as a stray and the check cries wolf on its first use.
+- **`ack()` resolves ancestors.** `dirty_at_start` may name a directory, and every
+  file inside it is then acknowledged too. Comparing file paths against that list
+  with `in` marks the user's `scratch/a.md` as an unexplained stray and stops a
+  run that was fine — and, worse, sends you into the restore below with their work
+  as the target.
+- **The rename origin is tested as well.** A staged move *out of* an unowned path
+  *into* an owned one otherwise reports clean, and the batch commits a file it
+  never owned.
+
+What comes back:
 
 | Result | What it means | What to do |
 |---|---|---|
 | `clean — the contract held` | nothing changed outside the owned paths except dirt the run already acknowledged | §8 |
 | `STOP` + a path marked **NOT owned by this batch** | the implementer strayed | Stop. This is a scope change, and scope changes are the user's call. Capture it, show it, ask (below). |
-| a path marked **acknowledged dirt** | it was already dirty when the run opened | Leave it alone. It is not yours to stage, revert, or clean. The check cannot tell "still only the user's edit" from "the implementer edited it too" — if you suspect the latter, diff it against the capture §3 made and treat it as a stray. |
+| a path marked **acknowledged dirt** | it was already dirty when the run opened, or sits under a directory that was | Leave it alone. It is not yours to stage, revert, or clean, and it is **never** a target of the restore below. The check cannot tell "still only the user's edit" from "the implementer edited it too"; if you suspect the latter, `git diff <git.start_head> -- <path>` shows everything that happened to it since the run opened. |
 | `.clodex/profile.json` | the router repaired the profile and did not commit it, or the user edited it | Leave it, and say so in chat. It is the one file `git check-ignore` lets through, and it is never yours to stage (§2). |
 
-For a stray path, capture the evidence before anything changes:
+For a path the check printed as **NOT owned by this batch** — and only those —
+capture the evidence before anything changes:
 
 ```bash
 git diff -- <stray tracked paths> > "$RUN_DIR/batch-<N>.stray.diff"
-git status --short -- <stray paths>
+git status --short --untracked-files=all -- <stray paths>
 ```
 
 Then put it to the user with the diff and exactly two ways forward: **the stray
 edit is needed** — that is a scope change, so amend the plan (§11) to own the
 path, and the work continues; or **it is not needed** — restore those paths and
-re-run the batch. Only restore after they say so, and only paths that were clean
-at start and are not in `dirty_at_start`:
+re-run the batch. Restore only after they say so, and only paths the check itself
+listed as `NOT owned by this batch`:
 
 ```bash
-git checkout -- <stray tracked paths>     # tracked, was clean at start
-mv <stray untracked path> "$RUN_DIR/stray/"   # untracked: move aside, never rm
+mkdir -p "$RUN_DIR/stray"
+git checkout -- <stray tracked paths>          # tracked, and clean when the run opened
+mv <stray untracked path> "$RUN_DIR/stray/"    # untracked: move aside, never rm
 ```
+
+**Do not select these paths by hand, and do not re-derive them.** "Not in
+`dirty_at_start`" is not the test — a file inside an acknowledged *directory* is
+not in that list either, and using it as the guard is how the user's untracked
+work in progress ends up moved out of their tree. The only paths eligible here
+are the ones printed as `NOT owned by this batch`; a path printed as
+`acknowledged dirt` is out of scope for both commands above, always.
+
+`git checkout -- <path>` is on the router's never-run list (`clodex` §5B), and
+this is the one place it is defensible: the path is not acknowledged dirt, so it
+was clean when the run opened, which means the only edit being discarded is the
+implementer's own — captured in the diff above, and only after the user said to.
+Outside that guard the rule stands unchanged.
 
 A release-owned file among the strays (§2) is the one case where the answer is
 not open: it is restored, never folded. Ship owns it.
@@ -455,8 +521,16 @@ repo root:
 
 ```bash
 TEST_CMD="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["commands"]["test"] or "")' "$PROFILE")"
-[ -n "$TEST_CMD" ] && bash -c "$TEST_CMD"; echo "gate rc=$?"
+if [ -n "$TEST_CMD" ]; then
+    bash -c "$TEST_CMD"; echo "gate rc=$?"
+else
+    echo "no test command in this profile — no micro-gate to run"
+fi
 ```
+
+Use the `if`, not `[ -n "$TEST_CMD" ] && …`. With `commands.test: null` the test
+itself is what fails, so the one-liner prints `gate rc=1` — a red gate in a repo
+that has no gate, sending you to fix a failure that does not exist.
 
 - **rc 0** → green. Continue to §9.
 - **non-zero** → red. The delta does not leave this stage. Fix it — yourself, or
@@ -481,6 +555,17 @@ not report their state as if it were a gate you passed.
 "Locally reviewed" is not a feeling. It is these three things, in order.
 
 **(a) Stage the owned paths and read the whole delta yourself.**
+
+```bash
+git status --porcelain --untracked-files=all -- src/thing/ docs/plans/<plan file>.md
+```
+
+**Every path that lists must be one this batch authored.** Staging a *directory*
+stages whatever is inside it, including a file the user left there — so if
+anything in that list is not yours, do not `git add` the directory: add the files
+by name. Then go back to §3, because an unowned file inside an owned directory
+means the overlap resolution was skipped or answered wrong, and the fix belongs
+there, with the user, not here.
 
 ```bash
 git add -- src/thing/ docs/plans/<plan file>.md      # explicit paths, never -A, never .
@@ -530,9 +615,21 @@ that would produce wrong or unshippable work, low/info for improvements. The rc
 table in §6 applies unchanged — only a `complete` round is a review.
 
 **(c) Dispose every finding.** Record each one, then dispose it `fixed`,
-`accepted`, or `rejected`. The rules are `clodex-plan` §9 and they are identical
-here, including that only the user may accept or reject one. Namespace ids by
-batch, because the runner mints `F001` fresh every invocation:
+`accepted`, or `rejected`. What carries over unchanged from `clodex-plan` §9:
+the three dispositions and what each means, that **only the user** may accept or
+reject one (and their words go in the `note`), that nothing is ever dropped, and
+that severity does not restrict disposition — an `accepted` blocker is a
+legitimate end state that survives into ship.
+
+What does **not** carry over: that skill's `fixed` row says fixing implies an
+amendment and a new plan hash, because there the artifact being fixed *is* the
+plan. Here, `fixed` almost always means you changed **code** — ordinary batch
+work, no amendment, no hash movement, no approvals revoked. A code-review finding
+becomes an amendment only when it trips one of §11's triggers, i.e. when the fix
+is in the plan rather than in the code. Amending for a code fix would revoke
+every approval on the run for nothing.
+
+Namespace ids by batch, because the runner mints `F001` fresh every invocation:
 
 ```json
 {"e": "finding:recorded", "id": "b1-F001", "source": "code-reviewer",
@@ -582,6 +679,8 @@ reviewed delta, so anything you change between the verdict and the commit makes
 the review stale and sends you back to §9.
 
 ```bash
+git diff --quiet -- src/thing/ docs/plans/<plan file>.md \
+  || echo "owned paths changed since you staged them — the review is stale, back to §9"
 git commit -m "<type>(<scope>): <the batch's Done when, in one line>" \
            -- src/thing/ docs/plans/<plan file>.md      # the batch's owned paths
 COMMIT="$(git rev-parse HEAD)"
@@ -593,6 +692,14 @@ commit -m` commits the whole index, and the index is not only yours: a user who
 staged their own work before the run has it swept into your commit, silently,
 and `git show` is where you would find out. With the pathspec, git commits those
 paths and nothing else, and their staged work stays staged.
+
+**That pathspec commits the working tree, not the index** — which is why the
+`git diff --quiet` runs first. Given a pathspec, git takes the current file
+contents and disregards what you staged, so a file edited after §9 produced its
+diff is committed in its newer form, and `git show --stat` will not tell you:
+the file list is identical either way, and only the content moved. The guard
+makes that impossible to miss — it exits non-zero exactly when an owned path has
+unstaged changes, meaning the delta you reviewed is not the delta about to land.
 
 Never `git add -A`, `git add .`, or `git commit -a`, and never `git add <dir>`
 when that directory holds files the batch does not own. The change boundary
@@ -727,60 +834,95 @@ amendment, its re-review, and its re-approval all happen here.
 
 ## 12. Exit
 
-Check it from the manifest, not from memory:
+Check it from the manifest and the tree, not from memory. Pass the batch ids the
+plan's Batches table lists — the manifest cannot know about a batch nobody ever
+opened:
 
 ```bash
-python3 - "$STATE" "$RUN_DIR" <<'PY'
-import json, subprocess, sys
-snap = json.loads(subprocess.check_output(["python3", sys.argv[1], "rebuild", sys.argv[2]]))
-ok = True
+RUNNER_STATE="${CLODEX_RUNNER_STATE_DIR:-$REPO/.clodex/runner}"
+python3 - "$STATE" "$RUN_DIR" "$RUNNER_STATE" 1 2 3 <<'PY'
+import glob, hashlib, json, os, subprocess, sys
+state, run_dir, runner_state = sys.argv[1], sys.argv[2], sys.argv[3]
+planned = sys.argv[4:]                       # the batch ids in the plan's Batches table
+snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
+blockers = []
+
+seen = {str(b["id"]) for b in snap["batches"]}
+for pid in planned:
+    if pid not in seen:
+        blockers.append("planned batch %s was never opened" % pid)
 for b in snap["batches"]:
     good = bool(b["commit"]) and b["delta_review"] in ("pass", "pass-no-test-command")
-    ok &= good
     print("batch %-4s commit=%-9s delta_review=%-22s %s" % (
         b["id"], (b["commit"] or "-")[:8], b["delta_review"], "ok" if good else "NOT DONE"))
+    if not good:
+        blockers.append("batch %s is not both reviewed-pass and committed" % b["id"])
+
 open_f = [f["id"] for f in snap["findings"] if f["disposition"] == "open"]
-live = [a for a in snap["approvals"] if a["revoked"] is None and a["scope"] == "plan"]
 print("open findings:", " ".join(open_f) or "(none)")
+if open_f:
+    blockers.append("findings still open: " + " ".join(open_f))
+
+live = [a for a in snap["approvals"] if a["revoked"] is None and a["scope"] == "plan"]
 print("standing plan approval on the current hash:", bool(live))
-print("declared re-reviews:", [r for a in snap["plan"]["amendments"] for r in a["required_review"]] or "(none)")
-ok &= not open_f and bool(live)
-print("BUILD COMPLETE" if ok else "NOT DONE")
+if not live:
+    blockers.append("no standing plan approval on the current plan hash")
+
+# A re-review leaves no event, so the evidence is the envelope: complete, that
+# role, hashing the CURRENT plan file.
+plan_path = snap["plan"]["path"]
+want = (hashlib.sha256(open(plan_path, "rb").read()).hexdigest()
+        if plan_path and os.path.exists(plan_path) else None)
+ran = set()
+for path in sorted(glob.glob(os.path.join(runner_state, "*", "*.envelope.json"))):
+    env = json.load(open(path))
+    if env["status"] == "complete" and any(i["sha256"] == want for i in env["inputs"]):
+        ran.add(env["role"])
+declared = [r for a in snap["plan"]["amendments"] for r in a["required_review"]]
+print("declared re-reviews:", declared or "(none)", "| evidenced:", sorted(ran) or "(none)")
+for role in sorted(set(declared)):
+    if role not in ran:
+        blockers.append("declared re-review %r has no complete envelope against the current plan" % role)
+
+owned = sorted({p for b in snap["batches"] for p in b["owned_paths"]})
+if owned:
+    left = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=all", "--"] + owned).decode().strip()
+    print("owned paths uncommitted:", left.replace("\n", " | ") or "(none)")
+    if left:
+        blockers.append("owned paths still uncommitted: " + left.replace("\n", " | "))
+
+for b in blockers:
+    print("BLOCKER:", b)
+print("BUILD COMPLETE" if not blockers else "NOT DONE — %d blocker(s)" % len(blockers))
 PY
 ```
 
-All five must hold:
+That script checks four of the five criteria below and prints `BUILD COMPLETE`
+only when none of them is outstanding. Do not read the pass line as an answer to
+criterion 5, which it cannot see.
 
 1. Every batch in the plan's Batches table has been opened, and every batch in
-   the manifest has a `commit` and a passing `delta_review`.
-2. No finding is `open`.
+   the manifest has a `commit` and a passing `delta_review`. *(Checked — pass the
+   planned ids.)*
+2. No finding is `open`. *(Checked.)*
 3. A plan approval stands on the current hash, and every re-review an amendment
-   declared has actually been run. The manifest cannot answer the second — no
-   event records "a review happened" — so the evidence is the envelope on disk: a
-   `complete` one, in that role, whose inputs hash the **current** plan file.
-
-   ```bash
-   python3 - "$PLAN" "$REPO/.clodex/runner" <<'PY'
-   import glob, hashlib, json, os, sys
-   want = hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()
-   for path in sorted(glob.glob(os.path.join(sys.argv[2], "*", "*.envelope.json"))):
-       env = json.load(open(path))
-       if env["status"] == "complete" and any(i["sha256"] == want for i in env["inputs"]):
-           print("ran against the current plan:", env["role"], env["invocation_id"])
-   PY
-   ```
-
-   (Python does the globbing, so this behaves the same in a shell that errors on
-   an unmatched glob.) An `implementer` row is expected — §6 passes the plan as
-   an input too. What matters is that every role in every amendment's
-   `required_review` appears. One that does not is §11 step 6, not a judgment
-   call.
-4. `git status --porcelain --untracked-files=all -- <every owned path>` prints
-   nothing: no owned path is left uncommitted. A plan file amended after its
-   batch was committed is the usual culprit — it belongs to the remediation
-   batch.
-5. Every plan item is done **or** amended. An item you neither built nor amended
-   is not an exit; it is §11.
+   declared has actually been run. *(Both checked.)* No event records "a review
+   happened", so the evidence for the second is the envelope on disk: a
+   `complete` one, in that role, whose inputs hash the **current** plan file — an
+   amendment moves that hash, so a round run before it cannot satisfy the round
+   it demanded. `CLODEX_RUNNER_STATE_DIR` overrides where the runner keeps those
+   envelopes, so the check reads it rather than assuming `.clodex/runner`, and
+   Python does the globbing so an unmatched pattern behaves the same in every
+   shell. An `implementer` role appearing in `evidenced` is expected — §6 passes
+   the plan as an input too — and it satisfies nothing but itself.
+4. No owned path is left uncommitted. *(Checked, over the union of every batch's
+   owned paths.)* A plan file amended after its batch was committed is the usual
+   culprit — it belongs to the remediation batch.
+5. Every plan item is done **or** amended. **This one is yours**, read against
+   the plan text: nothing in the manifest knows what the plan promised beyond the
+   batch ids you passed in. An item you neither built nor amended is not an exit;
+   it is §11.
 
 Then hand off the way the router does: invoke `clodex-verify` and give it the
 absolute run directory — *"clodex-verify, run dir
@@ -810,5 +952,7 @@ plan file, a commit, or the log — or it does not exist.
 | Amending without re-approving, because the change was small | Every amendment revokes every approval bound to the old hash — the plan approval included. There is no amendment that costs nothing (§11). |
 | Handing back to `clodex-plan` to fix the plan | Refused: *"stage would move backwards, build -> plan"*. Build runs the amendment itself. |
 | Reverting or stashing a dirty file that was not yours | Acknowledged dirt is left exactly as it is (§7). Only the user moves their own work. |
+| Treating a `dirty_at_start` entry as a file path | It may be a directory, and then every file inside it is acknowledged and every owned path inside it overlaps. §3 expands and tests both directions; §7 resolves ancestors. Comparing with `==` or `in` fails both ways at once — a silent commit of the user's file, and a false STOP on their WIP. |
+| Using "not in `dirty_at_start`" as the guard before restoring a stray | A file inside an acknowledged directory is not in that list either, so the guard passes and the `mv` takes the user's work out of their tree. Restore only what §7 printed as `NOT owned by this batch`. |
 | Recording `delta_review: "pass"` in a repo with no test command | `pass-no-test-command`, so verify and ship can see that nothing executed (§8). |
 | Inventing an event name | The vocabulary is frozen at 23 names and the reducer refuses anything else. This stage appends eight of them (§0). |
