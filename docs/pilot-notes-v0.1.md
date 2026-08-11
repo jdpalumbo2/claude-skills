@@ -12,8 +12,14 @@ duplicate-pressing detection. A real unchecked backlog item with its own
 Done-when.
 
 **Run id:** `r-2026-08-11-a`
-**Terminal state:** **stage `plan`, release `not-started`, 3 findings open, 0
-approvals.** The run did not reach build, verify, or ship.
+**Terminal state at the first sitting:** stage `plan`, release `not-started`,
+3 findings open, 0 approvals. The run did not reach build, verify, or ship.
+
+> **The same run was resumed later the same day and completed.** Everything from
+> "Headline result" down describes the first sitting and is left exactly as it
+> was written, because it is the honest record of what the plan stage cost. The
+> completion, its criteria table, and what the second sitting found are in
+> **"The run, completed"** at the end of this document.
 
 ---
 
@@ -311,3 +317,86 @@ the release authorization, the `skipped:` reason grammar, and the
 `verify-live`-cannot-be-cut refusal all remain untested. A second pilot should
 start from a plan that is already approved, so those stages get the same
 scrutiny plan review just received.
+
+---
+
+# The run, completed
+
+Run `r-2026-08-11-a` was resumed the same day, after two engine fixes, and taken
+to a terminal state.
+
+**Terminal state:** stage `closed`, release **`not-deployed`** with a reasoned
+boundary, tag `v1.7.0` pushed, plan v9, 2 batches committed and reviewed,
+52 findings all disposed, **zero verification debt**, 4 of 6 release steps done
+and the other 2 declared skipped with a reason.
+
+`v1.7.0` is on `feature/f-1.7.0-ingest-hardening` at `b2508a3`, pushed with its
+tag. It is deliberately not live: the site deploys from `main`, and the two
+actions that would merge and publish it — `merge-main-ff` and `push-main`, both
+`always-ask-exact` — were excluded from the release authorization on purpose.
+
+## What was fixed first, and why it mattered here
+
+Two changes went in before the run resumed, and both proved load-bearing within
+the hour:
+
+1. **Manifest telemetry**, closing the criterion-2 gap this document identified.
+   Optional `preflight` and `codex` fields on any event, plus `severity`,
+   `summary`, `round`, `invocation` and `plan_hash` on `finding:recorded` — no
+   new event names, the vocabulary stays at 23.
+2. **The four defects parked at the build thread's review cap.** One of them,
+   the directory-style changelog, had been ruled "not the pilot shape" — and it
+   *was* the pilot's shape. `changelog.path` here is a directory, so §7.2's
+   compare would have raised `IsADirectoryError` at the release commit and the
+   release could not have happened at all. That ruling was made by a reviewer
+   that never read the pilot's profile, which did not exist yet.
+
+## Success criteria — answered from the manifest alone
+
+Same discipline as the first table: every answer below comes from `rebuild`
+output, and any fallback to session memory is called out as a failure.
+
+| # | Criterion | Verdict | Evidence, from the manifest |
+|---|---|---|---|
+| 1 | Manifest present and honest at every stage | **PASS** | `stage: closed`, every stage entered in order. `plan: v9, 8 amendments`. Both batches carry a commit, a `pass` delta review, and the invocation id that reviewed them. `approvals` shows **5 entries, 3 of them revoked** — including the two the operator got wrong and had to redo — and the revocations name their superseding hash. `release` is terminal with its tag, its one timestamp, and all four executed steps two-phase. Nothing had to be corrected to make it honest, and the unflattering parts are the ones that prove it. |
+| 2 | Zero transcript reconstruction needed to answer "what happened" | **PASS on the stages the fixed engine ran** | Now answerable from `rebuild`: **preflight ran and passed, 6 checks** (the first sitting's sharpest failure); **7 Codex legs across 3 roles with durations, envelope paths and input hashes**, totalling 45.7 minutes; which invocation reviewed each batch, off `batches[].invocation`; all **52 findings with severity and summary**, 14 of them linked to the invocation that raised them; evidence with `how` and `result` per class; the authorization's exact actions and its empty `accepted_debt`. All four `code-reviewer` legs are individually attributable — two via `batches[].invocation`, two via a finding's `invocation`. **Caveat, and it is a real one:** the 30 plan-stage findings carry **no `round`**, because they were written before the telemetry fix existed. Round 7 is recoverable only from `invocations[].round`. So criterion 2 is judged on build, verify and ship; the plan stage remains as the first table found it. |
+| 3 | Release closed with verified live state or an explicit boundary | **PASS** | `release.state: not-deployed`, terminal, `run:closed` appended. `deployed` opens with the `skipped: deploy, verify-live \| …` grammar and carries the reason: production deploys from `main`, this went to a feature branch, and the merge was reserved for the user. §10 accepted it — **and would have refused it without the reason**, which is the parked defect fixed that morning doing its job on its first real release. |
+| 4 | Fewer human gates than the TRIP baseline | **PASS, with the comparison reasoned rather than measured** | Four gates were spent across plan-resume → build → verify → ship: the batch-2 release-owned-path amendment, the disposition of nine verify findings, the release authorization, and one corrected authorization after an operator error. **Two of those four were caused by defects, not by the design** — on a clean path it is two. The TRIP side is not measured in this session; the study's characterisation is that the incumbent asks a question per release step, and `TRIP-3-release` alone names eight. Four beats that, but the honest label is "reasoned", not "measured". |
+| 5 | No runner incident traceable to cwd, prompt transport, or lost state | **PASS** | Seven legs, **all `complete`, none `partial`, none `interrupted`, none resumed**. Zero cwd incidents; every invocation ran from the repo root. Prompts travelled by file throughout, across documents full of em-dashes, `$` and quotes — zero shell-quoting incidents. No lost run state across 146 events, three sessions' worth of appends, and two approval revocations. The 600 s harness tool timeout is still real and every Codex call was launched detached to survive it; that is the harness limit this document already recorded, not a runner defect. |
+
+**All five green.** The two amber notes are stated above rather than hidden: the
+plan stage's findings predate the round field, and criterion 4's comparison is
+reasoned.
+
+## What the completion cost
+
+- **45.7 minutes of Codex wall clock** across 7 legs: `plan-reviewer` 1 round
+  (168 s), `implementer` 2 legs (896 s), `code-reviewer` 4 legs (1679 s).
+- **52 findings**, 40 fixed and 12 accepted. By source: 30 plan-reviewer,
+  14 code-reviewer, 8 ship.
+- **Zero verification debt.** Both declared classes produced evidence.
+
+## What the second sitting found
+
+Recorded in full in `v0.2-debt.md`. The three that matter most:
+
+1. **§7's boundary check cannot tell "the implementer strayed" from "another
+   session's work appeared", and its remedy is destructive.** It reported
+   `STOP — 9 paths`; none was the implementer's. Following §7's prescribed
+   `git checkout --` and `mv` would have reverted six of a concurrent session's
+   working files and moved two untracked plan documents out of the tree.
+2. **The micro-gate is not attributable in a shared working tree, and a red one
+   has no legal remedy.** A concurrent session's half-written module turned the
+   suite red mid-run; §8's only two remedies are both forbidden on another
+   session's file, and recording it as debt is forbidden too. Resolved by
+   running the gate in a clean worktree holding the committed branch state plus
+   the batch's owned files — which is what actually ships.
+3. **An authorization payload error is uncorrectable without amending the
+   plan.** A second `approval:granted` leaves two standing authorizations and
+   §10 blocks; only an amendment revokes the first. That worked, but "amend the
+   plan to fix a ship typo" is the wrong shape.
+
+And the one the first sitting predicted correctly: **the plan stage produced a
+plan that the build stage forbids.** Batch 2 owned the changelog and the version
+source. Six rounds of plan review did not catch it, and could not have —
+nothing tells the plan author or the reviewer what the release-owned set is.
