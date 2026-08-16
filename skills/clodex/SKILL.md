@@ -216,9 +216,12 @@ costs one `ls`.
    *
    !.gitignore
    !profile.json
+   !claims.json
    ```
    The `!.gitignore` line lets the file exempt itself; without it the remedy
-   ignores its own carrier. Show the user, write it after they agree, and make
+   ignores its own carrier. `claims.json` is the shared-claims ledger (check
+   8) — committed state like the profile, so it gets the same negation (for a
+   root-style remedy: `!.clodex/claims.json`). Show the user, write it after they agree, and make
    sure it gets **committed** (§3 step 4 commits it beside the profile) — an
    uncommitted nested file does not exist in a fresh worktree, which is exactly
    where run state most needs ignoring. Root-`.gitignore` lines (`.clodex/*` +
@@ -282,6 +285,48 @@ costs one `ls`.
    (§3), run once from the main checkout on the default branch before lanes
    fork; tell the user that, and wait. In the main checkout this check is a
    no-op — §3 handles the first run there.
+8. **Claims (when `.clodex/claims.json` exists).** The shared-claims ledger:
+   collision-prone resources — migration numbers, ports, workflow ids,
+   property names — claimed for the repo's concurrent lanes. **Orchestrator-
+   owned: only the orchestrator writes or commits it; lanes read.** Shape:
+   ```json
+   {"claims": [{"resource": "migration-008", "holder": "lane-C",
+                "note": "room-liveness schema"}]}
+   ```
+   Check every resource this run will need — the brief usually names them,
+   and the plan's `Claims:` line (clodex-plan §5) re-checks at plan time:
+   ```bash
+   python3 - "$REPO/.clodex/claims.json" <needed resource>... <<'PY'
+   import json, sys
+   path, needed = sys.argv[1], sys.argv[2:]
+   try:
+       held = {c["resource"]: c for c in json.load(open(path)).get("claims", [])}
+   except FileNotFoundError:
+       print("no claims ledger"); raise SystemExit(0)
+   rc = 0
+   for r in needed:
+       c = held.get(r)
+       if c and c.get("holder"):
+           print("CLAIMED: %s is held by %s%s" % (r, c["holder"],
+                 " — " + c["note"] if c.get("note") else ""))
+           rc = 1
+       else:
+           print("free:", r)
+   raise SystemExit(rc)
+   PY
+   ```
+   A `CLAIMED` hit **fails the lane here** — three lanes once independently
+   claimed the same migration number, and only the orchestrator's hand
+   arbitration caught it at merge. The fix is theirs: renumber, or get the
+   orchestrator to reassign the claim and commit the ledger. Never edit
+   `claims.json` from a lane, even to claim for yourself — a lane has no
+   commit authority over shared coordination state.
+
+   **Waiting on a sibling lane** is the same read-only discipline: the
+   sanctioned recipe is a Monitor polling
+   `git ls-tree <default-branch> -- <the path the sibling will land>` until
+   it appears — no new event, no shared mutable state, and the poll answers
+   from committed truth rather than from another lane's promises.
 
 ---
 
@@ -547,7 +592,10 @@ failure this ritual kills: two lanes once interviewed independently six
 minutes apart, produced contradictory profiles, and wall-clock picked the
 winner — a push-policy divergence between two lanes of the same weekend traced
 straight to it. Once the bootstrap commit exists, every lane's preflight
-**requires** it (§1 check 7) and no lane ever interviews.
+**requires** it (§1 check 7) and no lane ever interviews. A repo whose lanes
+contend for numbered or named resources also bootstraps the claims ledger —
+an empty `{"claims": []}` in `.clodex/claims.json`, committed the same way;
+the orchestrator alone writes to it thereafter (§1 check 8).
 
 ---
 

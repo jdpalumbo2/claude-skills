@@ -306,6 +306,14 @@ describe? `none` is an answer. Paths mean a batch listed above owns updating
 them — name the batch. Architecture docs are read at plan time; without an
 owner here, nothing ever maintains them.
 
+Claims: <resources, or omit the line>       <!-- only when .clodex/claims.json exists -->
+
+Collision-prone resources this plan takes: migration numbers, ports, workflow
+ids, property names. Check each against the ledger (`clodex` §1 check 8)
+before recording the plan — a resource already held stops the plan here, at
+the cheapest possible moment. The ledger is orchestrator-owned; this plan
+NAMES what it needs, it never writes the file.
+
 ## Evidence
 | Class | What will prove it |
 |---|---|
