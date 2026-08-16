@@ -7,7 +7,7 @@ validation) and the run-dir identity guard. Run via `tests/run.sh`.
 
 import unittest
 
-from clodex_harness import ClodexCheck
+from clodex_harness import ClodexCheck, git
 
 
 class SmokeOpenAppendRebuild(ClodexCheck):
@@ -94,6 +94,50 @@ class InlineEventPayload(ClodexCheck):
         run_dir = self.make_run()
         result = self.append(run_dir, {"e": "stage:plan:entered"})
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class RunsIndex(ClodexCheck):
+    """4.6 — the cross-run index: one status line per run across the main
+    checkout and its worktrees, replacing the orchestrator's hand-rolled
+    shell loop over worktrees/*/."""
+
+    def test_exploit_index_sees_main_and_worktree_runs(self):
+        from clodex_harness import run_state
+
+        self.make_run("r-2026-08-16-a")
+        git(self.repo, "branch", "lane-c")
+        (self.repo / "worktrees").mkdir()
+        worktree = self.repo / "worktrees" / "primer-rework"
+        git(self.repo, "worktree", "add", "-q", str(worktree), "lane-c")
+        lane_run = worktree / ".clodex" / "r-2026-08-16-b"
+        lane_run.mkdir(parents=True)
+        result = self.append(lane_run, {
+            "e": "run:opened", "run": "r-2026-08-16-b", "repo": str(worktree),
+            "branch": "lane-c", "lane": "feature", "brief": "lane",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.append(lane_run, {"e": "stage:plan:entered"})
+        self.append(lane_run, {
+            "e": "finding:recorded", "id": "r1-F001", "source": "audit",
+            "severity": "high", "summary": "open finding"})
+
+        out = run_state(["runs", str(self.repo)])
+        self.assertEqual(out.returncode, 0, out.stderr)
+        lines = [l for l in out.stdout.splitlines() if l.strip()]
+        self.assertEqual(len(lines), 2, out.stdout)
+        self.assertIn(".clodex/r-2026-08-16-a", out.stdout)
+        self.assertIn("worktrees/primer-rework/.clodex/r-2026-08-16-b", out.stdout)
+        lane_line = next(l for l in lines if "primer-rework" in l)
+        self.assertIn("plan", lane_line)
+        self.assertIn("findings-open=1", lane_line)
+        self.assertIn("release=not-started", lane_line)
+
+    def test_control_no_runs_is_not_an_error(self):
+        from clodex_harness import run_state
+
+        out = run_state(["runs", str(self.repo)])
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("no runs under", out.stdout)
 
 
 class FindingValidationAtAppendTime(ClodexCheck):

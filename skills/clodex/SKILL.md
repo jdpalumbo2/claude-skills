@@ -346,10 +346,21 @@ is nothing to resume. Close it out and open a new run:
 `echo '{"e":"run:closed"}' | python3 "$STATE" append "$RUN_DIR"` (legal on an
 empty log; it yields `stage: closed`).
 
-**v0.1 allows one open run per repo.** If you find two, the older is the one
-whose run id sorts first — the ids are `r-<date>-<letter>`, so plain
-lexicographic order is chronological. Resume it, or close it with the same
-`run:closed` append, before opening anything new.
+**One open run per *checkout*.** A linked worktree is its own checkout with
+its own `.clodex/`, which is what lets parallel lanes each carry a run — a
+documented feature, not an accident of `--show-toplevel`. Within one checkout:
+if you find two open runs, the older is the one whose run id sorts first —
+the ids are `r-<date>-<letter>`, so plain lexicographic order is
+chronological. Resume it, or close it with the same `run:closed` append,
+before opening anything new. The **repo-wide** picture — every run in the
+main checkout and every worktree — is the index, not a rule:
+
+```bash
+python3 "$STATE" runs "<main-checkout>"
+```
+
+One line per run: path, stage, open findings, release state. It replaces the
+shell loop every orchestrator otherwise hand-rolls over `worktrees/*/`.
 
 `status` also prints a `lock:` line when `lock.json` exists. That line decides
 what you may do:

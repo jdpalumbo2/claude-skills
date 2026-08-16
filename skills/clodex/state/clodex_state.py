@@ -58,6 +58,7 @@ CLI use (payloads travel by stdin by default; `-e` takes one inline event):
     python3 clodex_state.py status  <run_dir>
     python3 clodex_state.py boundary-check <run_dir> [--owned <path>]... [--baseline <file>]
     python3 clodex_state.py telemetry-sync <run_dir> <runner_dir>
+    python3 clodex_state.py runs    <main_checkout>
     python3 clodex_state.py unlock  <run_dir>
 
 CLI exit codes:
@@ -739,6 +740,50 @@ def _cmd_rebuild(args):
 
 
 # --------------------------------------------------------------------------- #
+# runs — the repo-wide index over per-checkout run state
+# --------------------------------------------------------------------------- #
+
+def _cmd_runs(args):
+    """One status line per run under the main checkout and its worktrees.
+
+    "One open run" is scoped per CHECKOUT — a worktree is its own checkout,
+    which is what lets parallel lanes each carry a run — so no single run dir
+    can answer "what is running in this repo". This walk can: `./.clodex/r-*`
+    plus `worktrees/*/.clodex/r-*`, one line each, replacing the shell loop
+    every orchestrator otherwise hand-rolls.
+    """
+    import glob as _glob
+
+    root = os.path.abspath(args.main_checkout)
+    if not os.path.isdir(root):
+        print("clodex-state: not a directory: %s" % root, file=sys.stderr)
+        return EXIT_USAGE
+    run_dirs = sorted(
+        _glob.glob(os.path.join(root, ".clodex", "r-*"))
+        + _glob.glob(os.path.join(root, "worktrees", "*", ".clodex", "r-*"))
+    )
+    printed = 0
+    for run_dir in run_dirs:
+        if not os.path.isdir(run_dir):
+            continue
+        rel = os.path.relpath(run_dir, root)
+        try:
+            snap = rebuild(run_dir)
+        except (ClodexStateError, OSError) as exc:
+            print("%-52s UNREADABLE: %s" % (rel, exc))
+            printed += 1
+            continue
+        open_findings = sum(1 for f in snap["findings"] if f["disposition"] == "open")
+        print("%-52s %-8s findings-open=%-3d release=%s" % (
+            rel, snap["stage"] or "-", open_findings, snap["release"]["state"],
+        ))
+        printed += 1
+    if not printed:
+        print("no runs under %s" % root)
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
 # telemetry sync — every envelope on disk has a codex block in the log
 # --------------------------------------------------------------------------- #
 
@@ -1039,9 +1084,18 @@ def main(argv=None):
         ("telemetry-sync", _cmd_telemetry_sync,
          "print a ready-to-attach codex block for every envelope the log has "
          "no record of; exit 1 when any was printed"),
+        ("runs", _cmd_runs,
+         "one status line per run under a main checkout and its worktrees/"),
         ("unlock", _cmd_unlock, "remove the session lock of a holder that is no longer running"),
     ):
         sub = subcommands.add_parser(name, help=help_text)
+        if name == "runs":
+            sub.add_argument(
+                "main_checkout",
+                help="the repo's main checkout; worktrees/ is walked beneath it",
+            )
+            sub.set_defaults(handler=handler)
+            continue
         sub.add_argument("run_dir", help="the run's directory")
         if name == "append":
             sub.add_argument(
