@@ -2247,6 +2247,13 @@ Close a terminal run — and only a terminal one:
 {"e": "run:closed"}
 ```
 
+**Then archive, when the run lives in a worktree**: run the archive recipe in
+`clodex` §2 ("Archive on close"). It copies the run dir plus every envelope
+the manifest names to `<main-checkout>/.clodex/archive/<run-id>/` — ignored,
+never committed — so the handoff artifact and the evidence this run's record
+points at outlive the worktree. A `handed-off` run whose artifact dies with
+its worktree hands off nothing.
+
 Two blockers that cannot be fixed by appending anything, and what to do instead:
 
 - **`state … is resumable but the run was closed`** — `closed` is terminal in the

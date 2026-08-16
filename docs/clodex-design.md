@@ -82,6 +82,13 @@ Entry point for all work. On invocation it:
 
 ### Run state (`.clodex/`, gitignored by default)
 
+*(Amended 2026-08-16, v0.2: gitignored is not the same as durable. A run that
+lives in a worktree is archived on close — its run dir plus the envelopes its
+manifest names are copied to `<main-checkout>/.clodex/archive/<run-id>/`,
+still ignored and never committed, so the release record's pointers outlive
+`git worktree remove`. Selection is manifest-driven via `invocations[]`; raw
+runner transcripts are deliberately left behind.)*
+
 Two files per run, with distinct write disciplines:
 
 - **`run-<id>.json`** — the snapshot. Written only via lock + atomic replace

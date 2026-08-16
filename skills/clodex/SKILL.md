@@ -288,6 +288,57 @@ verification debt, release state and any pending step. Then offer these three �
 - **Abandon** → append `{"e": "release:updated", "state": "abandoned"}`, then
   `{"e": "run:closed"}`.
 
+**Archive on close — every close path, this skill's and ship's.** A run that
+lives in a worktree keeps its evidence, envelopes and handoff artifact in a
+directory that dies with `git worktree remove`; a release record pointing into
+one points at deletable paths. So whenever a run closes in a checkout that is
+not the main one, copy the core across — archived into an ignored path, never
+committed, so no commit-authority question arises:
+
+```bash
+python3 - "$STATE" "$RUN_DIR" <<'PY'
+import json, os, shutil, subprocess, sys
+state, run_dir = sys.argv[1], sys.argv[2]
+snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
+repo = snap["repo"]
+head = subprocess.check_output(["git", "-C", repo, "worktree", "list", "--porcelain"]).decode()
+main = head.splitlines()[0].split(" ", 1)[1]          # first entry is the main checkout
+if os.path.realpath(main) == os.path.realpath(repo):
+    print("main checkout — run state is already as durable as it gets; nothing to do")
+    raise SystemExit(0)
+dest = os.path.join(main, ".clodex", "archive", os.path.basename(os.path.normpath(run_dir)))
+os.makedirs(dest, exist_ok=True)
+copied = 0
+for name in sorted(os.listdir(run_dir)):              # the run dir IS the core:
+    src = os.path.join(run_dir, name)                 # log, snapshot, prompts, diffs,
+    out = os.path.join(dest, name)                    # gate logs, evidence, handoff
+    if os.path.isfile(src):
+        shutil.copy2(src, out); copied += 1
+    elif os.path.isdir(src):
+        shutil.copytree(src, out, dirs_exist_ok=True); copied += 1
+# Envelopes are selected by the MANIFEST, not by globbing: invocations[] names
+# exactly the legs this run spent, and their envelopes are the only place
+# finding location/detail exist once the worktree is gone.
+for leg in snap.get("invocations") or []:
+    env = leg.get("envelope")
+    if not env:
+        continue
+    src = env if os.path.isabs(env) else os.path.join(repo, env)
+    if not os.path.isfile(src):
+        print("MISSING envelope (recorded but not on disk):", env)
+        continue
+    out = os.path.join(dest, "runner", os.path.basename(os.path.dirname(src)),
+                       os.path.basename(src))
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    shutil.copy2(src, out); copied += 1
+print("archived %d item(s) -> %s" % (copied, dest))
+PY
+```
+
+Raw runner transcripts (`*.events.ndjson` under `.clodex/runner/`) are
+deliberately not copied — they are an order of magnitude bigger than
+everything else combined, and the envelopes carry what the record needs.
+
 Never delete a run directory to get out of this. The log is the record of what
 happened.
 
