@@ -236,7 +236,7 @@ it is grounded in · its prior art — the existing mechanism here that solves a
 isomorphic problem, and why it is or is not the shape used · its assumptions ·
 its direction-gate answer · one *Done when* · what is in and out of scope · its
 batches, each with owned paths and its own *Done when* · its evidence classes ·
-its risks.
+its risks · its docs impact.
 
 File: `<plans_dir>/<YYYY-MM-DD>-<slug>.md`, slug kebab-cased from the brief. If
 `plans_dir` already holds files, match their naming convention instead.
@@ -297,6 +297,13 @@ to `clodex-ship`, which closes them from evidence inside the release
 authorization; build categorically forbids them whatever the plan says, so a
 batch that owns one is a plan defect that otherwise surfaces at the first line
 of build — after every review round has passed it.
+
+Docs impact: none | <paths>
+
+Does this change alter behavior the profile's `docs.architecture` files
+describe? `none` is an answer. Paths mean a batch listed above owns updating
+them — name the batch. Architecture docs are read at plan time; without an
+owner here, nothing ever maintains them.
 
 ## Evidence
 | Class | What will prove it |
