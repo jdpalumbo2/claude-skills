@@ -1822,6 +1822,49 @@ record *that*, verbatim, as `verified_live`. Either closes the run. A release
 nobody will look at stays open, and that is the record being accurate rather
 than the workflow being stuck.
 
+### 7A. The handoff artifact — `release_owner: "external"` only
+
+When the profile declares the release externally owned, the run's deliverable
+is not a deploy — it is a reviewed branch **plus the file that lets someone
+else release it without re-deriving a single claim**. Five lane reports once
+reached their orchestrator as pasted chat, from worktrees scheduled for
+deletion; this section exists so that never recurs.
+
+After the final review (§3) and the authorization (§5 — which under §4's
+external derivation authorizes at most the push), and after the push step if
+this release has one:
+
+1. **Write the artifact** into the run dir from the template at
+   `$CLODEX_HOME/templates/handoff.md` — seven numbered sections: the
+   negative-space status line, the commits table, merge conditions, deploy
+   actions, accepted residuals **with finding ids**, the evidence index with
+   gate counts against baselines, and the run-log pointer. Every value is
+   **live-read at write time** (`git log`, the gate logs, the manifest) or
+   written as `<verify: how>`; the template says so per field. The residuals
+   section is read from the manifest's `findings` — ids, severity, location,
+   the promoted disposition notes — never from memory.
+
+2. **Record it.** The approval scope is `"handoff"`; `actions[]` is persisted
+   verbatim by the reducer, so it carries the pointers:
+
+   ```json
+   {"e": "approval:granted", "scope": "handoff", "by": "ship",
+    "plan_version": <N>, "plan_hash": "<current plan hash>",
+    "actions": [{"artifact": "<run-dir-relative path>",
+                 "branch": "<branch>", "base": "<base sha>"}]}
+   ```
+
+   No new gate: the user authorized this release's shape at §5, and §10's
+   close message presents the artifact path. The approval binds to the plan
+   hash mechanically, so a plan amendment after handoff revokes it — which is
+   right: an amended plan means the artifact describes a branch that no
+   longer matches it, and it gets rewritten and re-recorded.
+
+3. **Then** `release:updated` with `state: "handed-off"` and `deployed`
+   pointing at the artifact (§9), and close at §10 — which refuses
+   `handed-off` when either the profile does not declare the shape or this
+   approval is missing.
+
 ---
 
 ## 8. Reconcile before retry
