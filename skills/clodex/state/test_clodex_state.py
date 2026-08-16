@@ -59,7 +59,8 @@ CONCURRENT_APPEND_SCRIPT = (
     "        try:\n"
     "            clodex_state.append_event(run_dir, {'e': 'finding:recorded',\n"
     "                                               'id': '%%s-%%d' %% (label, index),\n"
-    "                                               'source': 'race'})\n"
+    "                                               'source': 'race',\n"
+    "                                               'severity': 'low', 'summary': 'race'})\n"
     "            break\n"
     "        except clodex_state.RunLocked:\n"
     "            time.sleep(0.005)\n"
@@ -81,7 +82,8 @@ DELEGATE_APPEND_SCRIPT = (
     "for index in range(count):\n"
     "    clodex_state.append_event(run_dir, {'e': 'finding:recorded',\n"
     "                                        'id': '%%s-%%d' %% (label, index),\n"
-    "                                        'source': 'delegate'})\n"
+    "                                        'source': 'delegate',\n"
+    "                                        'severity': 'low', 'summary': 'race'})\n"
 ) % str(HERE)
 
 IMPORT_BY_PATH_SCRIPT = (
@@ -538,7 +540,8 @@ class ReducerTests(StateTestCase):
             {"e": "batch:opened", "id": 1, "owned_paths": ["src/x/"]},
             {"e": "batch:committed", "id": 1, "commit": "deadbee"},
             {"e": "batch:reviewed", "id": 1, "delta_review": "pass"},
-            {"e": "finding:recorded", "id": "F1", "source": "plan-review"},
+            {"e": "finding:recorded", "id": "F1", "source": "plan-review",
+             "severity": "high", "summary": "x is wrong"},
             {"e": "finding:disposed", "id": "F1", "disposition": "fixed"},
             {"e": "verification:declared", "item": {"class": "unit-tests"}},
             {"e": "verification:evidence", "item": {"class": "unit-tests", "result": "pass"}},
@@ -549,7 +552,8 @@ class ReducerTests(StateTestCase):
             {"id": 1, "owned_paths": ["src/x/"], "commit": "deadbee", "delta_review": "pass"},
         ])
         self.assertEqual(snap["findings"], [
-            {"id": "F1", "source": "plan-review", "disposition": "fixed"},
+            {"id": "F1", "source": "plan-review", "disposition": "fixed",
+             "severity": "high", "summary": "x is wrong"},
         ])
         self.assertEqual(len(snap["verification"]["declared"]), 1)
         self.assertEqual(len(snap["verification"]["evidence"]), 1)
@@ -601,7 +605,8 @@ class TelemetryTests(StateTestCase):
         self.append_all(
             {"e": "run:opened"},
             {"e": "finding:recorded", "id": "r1-F001", "source": "plan-reviewer",
-             "severity": "high", "summary": "the plan predicts a row count it cannot know"},
+             "severity": "high", "summary": "the plan predicts a row count it cannot know",
+             "invocation": "inv-sev"},
         )
         finding = rebuild(self.run_dir)["findings"][0]
         self.assertEqual(finding["severity"], "high")
@@ -611,6 +616,7 @@ class TelemetryTests(StateTestCase):
         self.append_all(
             {"e": "run:opened"},
             {"e": "finding:recorded", "id": "r4-F002", "source": "plan-reviewer",
+             "severity": "medium", "summary": "raised in round 4",
              "round": 4, "invocation": "plan-reviewer-20260811T134400Z-88b056",
              "plan_hash": "a" * 64},
         )
@@ -621,17 +627,24 @@ class TelemetryTests(StateTestCase):
         self.assertEqual(finding["plan_hash"], "a" * 64)
 
     def test_a_finding_omits_the_optional_fields_it_was_not_given(self):
-        self.append_all(
-            {"e": "run:opened"},
-            {"e": "finding:recorded", "id": "F1", "source": "plan-reviewer"},
-        )
+        # Written out of band: append_event now demands severity/summary for
+        # NEW findings, but the reducer's omit-what-was-not-given contract must
+        # keep holding for logs written before that rule.
+        append_event(self.run_dir, {"e": "run:opened"})
+        with open(self.events, "a") as handle:
+            handle.write(json.dumps({
+                "schema_version": 1, "seq": 2, "t": "2026-08-11T00:00:00Z",
+                "e": "finding:recorded", "id": "F1", "source": "plan-reviewer",
+            }) + "\n")
         finding = rebuild(self.run_dir)["findings"][0]
         self.assertEqual(sorted(finding), ["disposition", "id", "source"])
 
     def test_a_codex_block_records_one_invocation_leg(self):
         self.append_all(
             {"e": "run:opened"},
-            {"e": "finding:recorded", "id": "r1-F001", "source": "plan-reviewer", "round": 1,
+            {"e": "finding:recorded", "id": "r1-F001", "source": "plan-reviewer",
+             "severity": "high", "summary": "leg accounting", "round": 1,
+             "invocation": "inv-1",
              "codex": {"invocation_id": "inv-1", "role": "plan-reviewer", "round": 1,
                        "status": "complete", "envelope": ".clodex/runner/plan-reviewer/inv-1.envelope.json",
                        "input_hashes": ["b" * 64], "duration_s": 366, "cost": 0.42}},
@@ -651,6 +664,7 @@ class TelemetryTests(StateTestCase):
         self.append_all(
             {"e": "run:opened"},
             {"e": "finding:recorded", "id": "r2-F001", "source": "plan-reviewer",
+             "severity": "medium", "summary": "resumed round", "invocation": "inv-2",
              "codex": {"invocation_id": "inv-2", "role": "plan-reviewer", "round": 2,
                        "status": "interrupted", "duration_s": 600}},
             {"e": "finding:disposed", "id": "r2-F001", "disposition": "fixed",
@@ -709,12 +723,14 @@ class TelemetryTests(StateTestCase):
         # it would read as evidence that a round happened.
         self.assert_refused_at_both_layers(
             {"e": "finding:recorded", "id": "F1", "source": "plan-reviewer",
+             "severity": "high", "summary": "x", "invocation": "inv-x",
              "codex": {"role": "plan-reviewer", "status": "complete"}},
         )
 
     def test_a_codex_block_without_a_role_is_refused(self):
         self.assert_refused_at_both_layers(
             {"e": "finding:recorded", "id": "F2", "source": "plan-reviewer",
+             "severity": "high", "summary": "x", "invocation": "inv-3",
              "codex": {"invocation_id": "inv-3", "status": "complete"}},
         )
 
@@ -759,7 +775,8 @@ class TelemetryTests(StateTestCase):
             {"e": "run:opened", "run": "r-1", "lane": "feature",
              "preflight": {"status": "pass", "checks": []}},
             {"e": "finding:recorded", "id": "r1-F001", "source": "plan-reviewer",
-             "severity": "high", "round": 1,
+             "severity": "high", "summary": "status line coverage", "round": 1,
+             "invocation": "inv-1",
              "codex": {"invocation_id": "inv-1", "role": "plan-reviewer", "round": 1,
                        "status": "complete", "duration_s": 366}},
         )

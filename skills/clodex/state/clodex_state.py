@@ -525,6 +525,42 @@ def _stamp(event, seq, timestamp):
     return record
 
 
+#: Codex roles: a finding from one of these has an envelope, and the join to it
+#: is the `invocation` field. (The enum lives in the runner's envelope schema;
+#: repeated here because the state engine must not read runner files to append.)
+_CODEX_ROLES = ("plan-reviewer", "implementer", "code-reviewer", "advisor")
+
+
+def _vet_new_event(event):
+    """Rules that bind NEW appends only — never the reducer, so a log written
+    before a rule existed still reduces unchanged.
+
+    `finding:recorded`: a finding with no severity or no summary is
+    content-free — it cannot be disposed on its merits, reviewed by an overturn
+    authority, or counted in a severity trend. And a finding from a Codex role
+    without its `invocation` has lost the join to the envelope that carries its
+    location and detail. Both shapes shipped in the field; neither is a record.
+    """
+    if event.get("e") != "finding:recorded":
+        return
+    for key in ("severity", "summary"):
+        value = event.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ClodexStateError(
+                "finding:recorded needs a non-empty %r — a content-free finding "
+                "cannot be disposed on its merits" % key
+            )
+    source = event.get("source")
+    if source in _CODEX_ROLES:
+        invocation = event.get("invocation")
+        if not isinstance(invocation, str) or not invocation.strip():
+            raise ClodexStateError(
+                "finding:recorded from Codex role %r needs its 'invocation' — "
+                "without it the join to the envelope (location, detail) is lost"
+                % source
+            )
+
+
 def append_event(run_dir, event):
     """Append one event to the log and fsync it. Returns the assigned seq.
 
@@ -542,6 +578,7 @@ def append_event(run_dir, event):
         raise ClodexStateError("event must be a JSON object, got %s" % type(event).__name__)
     if not event.get("e"):
         raise ClodexStateError("event is missing its 'e' (event type) field")
+    _vet_new_event(event)
 
     run_dir = str(run_dir)
     path = events_path(run_dir)
