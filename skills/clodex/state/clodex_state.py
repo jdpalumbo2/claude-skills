@@ -56,6 +56,7 @@ CLI use (payloads travel by stdin by default; `-e` takes one inline event):
     python3 clodex_state.py append <run_dir> -e '{"e": "stage:plan:entered"}'
     python3 clodex_state.py rebuild <run_dir>
     python3 clodex_state.py status  <run_dir>
+    python3 clodex_state.py boundary-check <run_dir> [--owned <path>]... [--baseline <file>]
     python3 clodex_state.py unlock  <run_dir>
 
 CLI exit codes:
@@ -699,6 +700,102 @@ def _cmd_rebuild(args):
     return EXIT_OK
 
 
+# --------------------------------------------------------------------------- #
+# boundary check — did the tree stay inside the contract?
+# --------------------------------------------------------------------------- #
+
+def _under(path, prefix):
+    """True when `path` IS `prefix` or sits inside it (prefix as a directory)."""
+    prefix = prefix.rstrip("/")
+    return path == prefix or path.startswith(prefix + "/")
+
+
+def _git_changed_paths(repo, raw=None):
+    """Every path `git status --porcelain -z --untracked-files=all` reports,
+    including rename/copy ORIGIN paths — a move out of an unowned path into an
+    owned one must count against the origin too.
+    """
+    if raw is None:
+        import subprocess
+        raw = subprocess.check_output(
+            ["git", "-C", repo, "status", "--porcelain", "-z", "--untracked-files=all"],
+        ).decode("utf-8", "surrogateescape")
+    fields, i, out = raw.split("\0"), 0, []
+    while i < len(fields) and fields[i]:
+        entry = fields[i]
+        i += 1
+        out.append((entry[:2], entry[3:]))
+        if entry[0] in ("R", "C"):
+            out.append((entry[:2], fields[i]))  # the rename's origin path
+            i += 1
+    return out
+
+
+def _cmd_boundary_check(args):
+    """Classify every changed path: owned / acknowledged / profile / STRAY.
+
+    Replaces the hand-written §7 loop the build skill used to carry. The
+    acknowledged set comes from `--baseline` (a pre-invocation
+    `git status --porcelain -z --untracked-files=all` capture) when given —
+    the at-open `dirty_at_start` snapshot is stale within minutes in a repo
+    with a concurrent session, and comparing against it misattributes the
+    other session's work to the implementer. Without `--baseline` it falls
+    back to `git.dirty_at_start`, ancestors resolved (an acknowledged
+    directory covers every file inside it).
+    """
+    snap = rebuild(args.run_dir)
+    repo = snap.get("repo")
+    if not repo or not os.path.isdir(repo):
+        print("clodex-state: run records no usable repo path: %r" % (repo,), file=sys.stderr)
+        return EXIT_USAGE
+
+    owned = list(args.owned or [])
+    if not owned:
+        batches = snap.get("batches") or []
+        if not batches:
+            print(
+                "clodex-state: no --owned paths given and no batch is open; "
+                "boundary-check needs the batch contract's owned paths",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        owned = list(batches[-1].get("owned_paths") or [])
+
+    if args.baseline is not None:
+        try:
+            with open(args.baseline, "r", encoding="utf-8") as handle:
+                acknowledged = [path for _, path in _git_changed_paths(repo, handle.read())]
+        except OSError as exc:
+            print("clodex-state: cannot read baseline %s: %s" % (args.baseline, exc),
+                  file=sys.stderr)
+            return EXIT_USAGE
+    else:
+        acknowledged = list(snap["git"]["dirty_at_start"])
+
+    strays = []
+    for xy, path in _git_changed_paths(repo):
+        if any(_under(path, o) for o in owned):
+            label = "owned"
+        elif any(_under(path, a) for a in acknowledged):
+            label = "acknowledged"
+        elif path == ".clodex/profile.json":
+            # The one file the ignore rules let through: a router repair or a
+            # user edit. Never staged by a run, never a restore target.
+            label = "profile"
+        else:
+            label = "STRAY"
+            strays.append(path)
+        print("%-12s [%s] %s" % (label, xy, path))
+
+    strays = sorted(set(strays))
+    if strays:
+        print("STOP — %d path(s) the contract does not allow: %s"
+              % (len(strays), " ".join(strays)))
+        return EXIT_REFUSED
+    print("clean — the contract held")
+    return EXIT_OK
+
+
 def _plural(count, noun):
     return "%d %s%s" % (count, noun, "" if count == 1 else "s")
 
@@ -822,6 +919,9 @@ def main(argv=None):
         ("append", _cmd_append, "append one JSON event read from stdin; prints the assigned seq"),
         ("rebuild", _cmd_rebuild, "print the snapshot rebuilt from the event log"),
         ("status", _cmd_status, "print a short summary of the run"),
+        ("boundary-check", _cmd_boundary_check,
+         "classify every changed path in the run's repo: owned / acknowledged / "
+         "profile / STRAY; exit 1 on strays"),
         ("unlock", _cmd_unlock, "remove the session lock of a holder that is no longer running"),
     ):
         sub = subcommands.add_parser(name, help=help_text)
@@ -832,6 +932,18 @@ def main(argv=None):
                 help="the event as an inline JSON argument instead of stdin — "
                      "for single events that would otherwise need a temp file; "
                      "payloads containing quotes are still safer as files",
+            )
+        if name == "boundary-check":
+            sub.add_argument(
+                "--owned", action="append", metavar="PATH",
+                help="an owned path of the batch under check (repeatable); "
+                     "defaults to the last opened batch's owned_paths",
+            )
+            sub.add_argument(
+                "--baseline", metavar="FILE",
+                help="a pre-invocation `git status --porcelain -z "
+                     "--untracked-files=all` capture; the acknowledged set comes "
+                     "from here instead of the at-open dirty_at_start snapshot",
             )
         if name == "unlock":
             sub.add_argument(

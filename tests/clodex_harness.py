@@ -65,7 +65,10 @@ class ClodexCheck(unittest.TestCase):
         git(self.repo, "config", "user.email", "check@clodex.test")
         git(self.repo, "config", "user.name", "clodex check")
         (self.repo / "README.md").write_text("synthetic repo\n")
-        git(self.repo, "add", "README.md")
+        # The router's ignore remedy, pre-applied: run state never shows up in
+        # `git status`, exactly as in a bootstrapped real repo.
+        (self.repo / ".gitignore").write_text(".clodex/*\n!.clodex/profile.json\n")
+        git(self.repo, "add", "README.md", ".gitignore")
         git(self.repo, "commit", "-q", "-m", "init")
 
     def head(self):

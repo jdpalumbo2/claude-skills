@@ -328,7 +328,15 @@ same rule).
 
 ## 6. Open the batch, then run the implementer
 
-Append, with the owned paths exactly as the contract lists them:
+First, capture the **pre-invocation baseline** — the tree exactly as it stands
+this moment. §7 classifies against it, because everything already changed *now*
+is provably not this batch's work:
+
+```bash
+git -C "$REPO" status --porcelain -z --untracked-files=all > "$RUN_DIR/batch-<N>.pre"
+```
+
+Then append, with the owned paths exactly as the contract lists them:
 
 ```json
 {"e": "batch:opened", "id": 1, "owned_paths": ["src/thing/", "docs/plans/2026-08-11-thing.md"]}
@@ -425,62 +433,35 @@ Run this **every time the implementer returns**, whatever its status. A
 promise, and this is the check.
 
 ```bash
-python3 - "$STATE" "$RUN_DIR" "src/thing/" "docs/plans/<plan file>.md" <<'PY'
-import json, subprocess, sys
-state, run_dir, owned = sys.argv[1], sys.argv[2], sys.argv[3:]
-snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
-acknowledged = snap["git"]["dirty_at_start"]
-
-def under(path, prefix):
-    return path == prefix.rstrip("/") or path.startswith(prefix.rstrip("/") + "/")
-
-def ack(path):        # an acknowledged DIRECTORY covers every file inside it
-    return any(under(path, d) for d in acknowledged)
-
-raw = subprocess.check_output(
-    ["git", "status", "--porcelain", "-z", "--untracked-files=all"]).decode()
-fields, i, stray = raw.split("\0"), 0, []
-while i < len(fields) and fields[i]:
-    entry = fields[i]; i += 1
-    paths = [entry[3:]]
-    if entry[0] in ("R", "C"):
-        paths.append(fields[i]); i += 1   # the origin too: a move OUT of an unowned path counts
-    for p in paths:
-        if not any(under(p, o) for o in owned):
-            stray.append((p, ack(p), entry[:2]))
-for path, acked, xy in sorted(set(stray)):
-    print("OUTSIDE  [%s] %-34s %s" % (xy, path, "acknowledged dirt — leave it alone" if acked
-                                      else "NOT owned by this batch"))
-unexplained = sorted({p for p, acked, xy in stray if not acked})
-print("clean — the contract held" if not unexplained
-      else "STOP — %d path(s) the contract does not allow: %s"
-           % (len(unexplained), " ".join(unexplained)))
-PY
+python3 "$STATE" boundary-check "$RUN_DIR" \
+    --owned "src/thing/" --owned "docs/plans/<plan file>.md" \
+    --baseline "$RUN_DIR/batch-<N>.pre"
 ```
 
-Pass this batch's owned paths only. Three things in that snippet are load-bearing
-and none of them is decoration:
+Pass this batch's owned paths only, and always pass the baseline §6 captured.
+The verb encodes what the hand-written check used to carry: it classifies every
+path `git status --porcelain -z --untracked-files=all` reports — untracked
+files expanded, and rename **origins** included, since a staged move out of an
+unowned path into an owned one must count against the origin or the batch
+commits a file it never owned — and exits non-zero when any `STRAY` exists.
 
-- **`--untracked-files=all`.** Plain `git status --porcelain` collapses an
-  untracked directory to `docs/`, so a new file at an owned path — the plan file,
-  most runs — reads as a stray and the check cries wolf on its first use.
-- **`ack()` resolves ancestors.** `dirty_at_start` may name a directory, and every
-  file inside it is then acknowledged too. Comparing file paths against that list
-  with `in` marks the user's `scratch/a.md` as an unexplained stray and stops a
-  run that was fine — and, worse, sends you into the restore below with their work
-  as the target.
-- **The rename origin is tested as well.** A staged move *out of* an unowned path
-  *into* an owned one otherwise reports clean, and the batch commits a file it
-  never owned.
+**The baseline, not `dirty_at_start`, is the acknowledged set.** The at-open
+snapshot is stale within minutes in a repo with a concurrent session:
+comparing against it once printed `STOP — 9 path(s)` where none of the nine
+was the implementer's, and the remedy below would have reverted six of another
+session's working files. Everything already changed when the baseline was
+written is provably not this batch's work. Omitting `--baseline` falls back to
+`dirty_at_start` (ancestors resolved) — legal, but only when no baseline
+exists, which for a batch you opened with §6 is never.
 
 What comes back:
 
 | Result | What it means | What to do |
 |---|---|---|
-| `clean — the contract held` | nothing changed outside the owned paths except dirt the run already acknowledged | §8 |
-| `STOP` + a path marked **NOT owned by this batch** | the implementer strayed | Stop. This is a scope change, and scope changes are the user's call. Capture it, show it, ask (below). |
-| a path marked **acknowledged dirt** | it was already dirty when the run opened, or sits under a directory that was | Leave it alone. It is not yours to stage, revert, or clean, and it is **never** a target of the restore below. The check cannot tell "still only the user's edit" from "the implementer edited it too" — the diff below answers that. |
-| `.clodex/profile.json` | the router repaired the profile and did not commit it, or the user edited it | Leave it, and say so in chat. It is the one file `git check-ignore` lets through, and it is never yours to stage (§2). |
+| `clean — the contract held` | nothing changed outside the owned paths except what the baseline already held | §8 |
+| exit 1 + a path marked **STRAY** | the implementer strayed — or something else wrote after the baseline; the second source below tells them apart | Stop. This is a scope change, and scope changes are the user's call. Capture it, show it, ask (below). |
+| a path marked **acknowledged** | it was already changed when the baseline was captured | Leave it alone. It is not yours to stage, revert, or clean, and it is **never** a target of the restore below. The check cannot tell "still only their edit" from "the implementer edited it too" — the diff below answers that. |
+| a path marked **profile** (`.clodex/profile.json`) | the router repaired the profile and did not commit it, or the user edited it | Leave it, and say so in chat. It is the one file `git check-ignore` lets through, and it is never yours to stage (§2). |
 
 Read-only, for an acknowledged path you suspect the implementer also touched —
 everything that happened to it since the run opened:
@@ -495,8 +476,17 @@ More there than the user's own edit means treat it as a stray after all. It
 still never becomes a target of the restore below: their edit is mixed into that
 file, so undoing the implementer's part is theirs to do, not yours.
 
-For a path the check printed as **NOT owned by this batch** — and only those —
-capture the evidence before anything changes:
+For a path the check printed as **STRAY** — and only those — first consult the
+**second source**: the implementer's own account of what it changed, in its
+envelope's report and its event stream. A stray the implementer's record names
+is its work. A stray its record does **not** name is far more likely another
+actor's, arrived in the window after the baseline — and **a restore is never
+offered for a path the run cannot prove the implementer touched**. Treat that
+path as the user's: show it, say the record does not claim it, and leave every
+restore command out of the message.
+
+For provably-the-implementer's strays, capture the evidence before anything
+changes:
 
 ```bash
 git diff -- <stray tracked paths> > "$RUN_DIR/batch-<N>.stray.diff"
@@ -506,8 +496,8 @@ git status --short --untracked-files=all -- <stray paths>
 Then put it to the user with the diff and exactly two ways forward: **the stray
 edit is needed** — that is a scope change, so amend the plan (§11) to own the
 path, and the work continues; or **it is not needed** — restore those paths and
-re-run the batch. Restore only after they say so, and only paths the check itself
-listed as `NOT owned by this batch`.
+re-run the batch. Restore only after they say so, and only paths the check
+itself listed as `STRAY` **and** the implementer's record claims.
 
 Which command applies is the `[XY]` the check printed beside the path:
 
@@ -546,11 +536,12 @@ lines below it expect.
 `dirty_at_start`" is not the test — a file inside an acknowledged *directory* is
 not in that list either, and using it as the guard is how the user's untracked
 work in progress ends up moved out of their tree. The only paths eligible here
-are the ones printed as `NOT owned by this batch`; a path printed as
-`acknowledged dirt` is out of scope for both commands above, always.
+are the ones the check printed as `STRAY` and the implementer's record claims;
+a path printed as `acknowledged` is out of scope for both commands above,
+always.
 
 `git checkout -- <path>` is on the router's never-run list (`clodex` §5B), and
-this is the one place it is defensible: the path is not acknowledged dirt, so it
+this is the one place it is defensible: the path is not acknowledged, so it
 was clean when the run opened, which means the only edit being discarded is the
 implementer's own — captured in the diff above, and only after the user said to.
 Outside that guard the rule stands unchanged.
@@ -1024,6 +1015,7 @@ plan file, a commit, or the log — or it does not exist.
 | Handing back to `clodex-plan` to fix the plan | Refused: *"stage would move backwards, build -> plan"*. Build runs the amendment itself. |
 | Reverting or stashing a dirty file that was not yours | Acknowledged dirt is left exactly as it is (§7). Only the user moves their own work. |
 | Treating a `dirty_at_start` entry as a file path | It may be a directory, and then every file inside it is acknowledged and every owned path inside it overlaps. §3 expands and tests both directions; §7 resolves ancestors. Comparing with `==` or `in` fails both ways at once — a silent commit of the user's file, and a false STOP on their WIP. |
-| Using "not in `dirty_at_start`" as the guard before restoring a stray | A file inside an acknowledged directory is not in that list either, so the guard passes and the `mv` takes the user's work out of their tree. Restore only what §7 printed as `NOT owned by this batch`. |
+| Using "not in `dirty_at_start`" as the guard before restoring a stray | A file inside an acknowledged directory is not in that list either, so the guard passes and the `mv` takes the user's work out of their tree. Restore only what §7's `boundary-check` printed as `STRAY` **and** the implementer's own record claims. |
+| Running the boundary check against the at-open dirty snapshot | Stale within minutes beside a concurrent session — it misattributes their work to the implementer. §6 captures `batch-<N>.pre` before `batch:opened`; §7 always passes it as `--baseline`. |
 | Recording `delta_review: "pass"` in a repo with no test command | `pass-no-test-command`, so verify and ship can see that nothing executed (§8). |
 | Inventing an event name | The vocabulary is frozen at 23 names and the reducer refuses anything else. This stage appends eight of them (§0). Something the names do not cover is a **field** on one of them — the optional `preflight` and `codex` blocks, and `finding:recorded`'s `severity`/`summary`/`round`/`invocation`/`plan_hash` (`clodex` → Telemetry). |
