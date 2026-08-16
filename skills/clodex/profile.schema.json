@@ -146,6 +146,12 @@
       }
     },
 
+    "release_owner": {
+      "type": "string",
+      "enum": ["run", "external"],
+      "description": "Who owns the release machinery. Optional; omitted means \"run\" — the run itself books, commits, tags, pushes, deploys per this profile. \"external\" declares the orchestrated-lane shape: the run's deliverable is a reviewed branch plus a handoff artifact, release actions belong to an external orchestrator, and ship's terminal state for a fully successful lane is `handed-off`, not `abandoned`. Deliberately not part of schema_version 1's required set: an old install that never reads this key behaves exactly as today."
+    },
+
     "evidence": {
       "type": "object",
       "description": "What proof this repo expects by default. A plan may declare more; declaring less is an argued exception, recorded in the plan.",
