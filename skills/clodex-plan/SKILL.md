@@ -439,14 +439,25 @@ Round: <N>
 Check, in this order:
 1. Does the plan satisfy the ask? Name anything asked for that no batch delivers.
 2. Is it grounded in this repo? Open the files it names. Flag any assumption the
-   code contradicts, any pattern it reinvents, any file it plans to edit that
-   does not exist.
-3. Are the batches' owned paths sufficient and disjoint? Flag work no batch owns,
-   and any path two batches own.
-4. Is each "done when" checkable by someone who did not write the plan?
-5. Does the declared evidence actually prove the change works? Flag a class that
+   code contradicts, and any file it plans to edit that does not exist.
+3. Interrogate `## Prior art`, with the repo open — not from the plan's prose.
+   Is the cited mechanism actually isomorphic to this problem? Is the stated
+   reason for using or diverging from its shape real? Search the repo for a
+   mechanism the author missed that solves an isomorphic problem — this
+   question has passed the most expensive defects when nobody owned it. Cite
+   repo paths for every claim, including "found nothing".
+4. Are the batches' owned paths sufficient and disjoint? Flag work no batch
+   owns, any path two batches own, and any owned path that appears in the
+   release-owned set printed beside the Batches table (version source,
+   changelog files, tags) — build refuses those categorically, so a batch that
+   owns one is a plan defect now, not at the first line of build.
+5. Is each "done when" checkable by someone who did not write the plan?
+6. Does the declared evidence actually prove the change works? Flag a class that
    cannot be produced in this repo, and any risk the evidence would not catch.
-6. What breaks in production that this plan does not consider?
+7. Does the change alter behavior that any of the profile's `docs.architecture`
+   files describe while the plan's `Docs impact:` line says `none`, or names
+   paths no batch owns updating?
+8. What breaks in production that this plan does not consider?
 
 Report findings only. Do not edit the plan and do not write code. Use
 blocker/high/medium for anything that would produce wrong or unshippable work,
