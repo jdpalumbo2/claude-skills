@@ -2098,6 +2098,13 @@ print("SHIP COMPLETE — release %s" % rel["state"] if not blockers
 PY
 ```
 
+**Reconcile telemetry** before closing: `python3 "$STATE" telemetry-sync
+"$RUN_DIR" "$REPO/.clodex/runner"` (`clodex` → Telemetry). `run:closed` is the
+log's last carrier — a `codex` block it prints here rides that event or rides
+nothing, and a closed run with unrecorded invocations under-reports what it
+cost forever. `duration_s` and `status` come from the envelope, never from
+memory.
+
 Close a terminal run — and only a terminal one:
 
 ```json

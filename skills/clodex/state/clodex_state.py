@@ -57,6 +57,7 @@ CLI use (payloads travel by stdin by default; `-e` takes one inline event):
     python3 clodex_state.py rebuild <run_dir>
     python3 clodex_state.py status  <run_dir>
     python3 clodex_state.py boundary-check <run_dir> [--owned <path>]... [--baseline <file>]
+    python3 clodex_state.py telemetry-sync <run_dir> <runner_dir>
     python3 clodex_state.py unlock  <run_dir>
 
 CLI exit codes:
@@ -701,6 +702,82 @@ def _cmd_rebuild(args):
 
 
 # --------------------------------------------------------------------------- #
+# telemetry sync — every envelope on disk has a codex block in the log
+# --------------------------------------------------------------------------- #
+
+def _cmd_telemetry_sync(args):
+    """Diff envelopes on disk against the log's `codex` blocks.
+
+    Every orphan — a completed invocation whose telemetry never reached the
+    log — is printed as one ready-to-attach JSON block per line, every field
+    copied from the envelope: `status` is never asserted and `duration_s` is
+    `exit.duration_ms`, never an estimate. A block in the log with no envelope
+    on disk is warned about on stderr (the envelope was lost, not the record).
+    Exit 0 when the log and the disk agree; 1 when orphans were printed.
+    """
+    snap = rebuild(args.run_dir)
+    recorded = {
+        leg.get("invocation_id")
+        for leg in snap.get("invocations") or []
+        if leg.get("invocation_id")
+    }
+
+    runner_dir = args.runner_dir
+    if not os.path.isdir(runner_dir):
+        print("clodex-state: runner dir does not exist: %s" % runner_dir, file=sys.stderr)
+        return EXIT_USAGE
+
+    on_disk = {}
+    for root, _dirs, files in os.walk(runner_dir):
+        for name in sorted(files):
+            if not name.endswith(".envelope.json"):
+                continue
+            path = os.path.join(root, name)
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    envelope = json.load(handle)
+            except (OSError, ValueError) as exc:
+                print("clodex-state: skipping unreadable envelope %s: %s" % (path, exc),
+                      file=sys.stderr)
+                continue
+            invocation_id = envelope.get("invocation_id")
+            if invocation_id:
+                on_disk[invocation_id] = (path, envelope)
+
+    orphans = 0
+    for invocation_id in sorted(set(on_disk) - recorded):
+        path, envelope = on_disk[invocation_id]
+        duration_ms = (envelope.get("exit") or {}).get("duration_ms")
+        block = {
+            "codex": {
+                "invocation_id": invocation_id,
+                "role": envelope.get("role"),
+                "round": None,
+                "status": envelope.get("status"),
+                "envelope": path,
+                "input_hashes": [i.get("sha256") for i in envelope.get("inputs") or []],
+                "duration_s": (duration_ms / 1000.0) if duration_ms is not None else None,
+                "resumed": (envelope.get("codex") or {}).get("resumed"),
+            }
+        }
+        print(json.dumps(block, sort_keys=True, separators=(",", ":")))
+        orphans += 1
+
+    for invocation_id in sorted(recorded - set(on_disk)):
+        print(
+            "clodex-state: logged invocation %s has no envelope under %s "
+            "(the record stands; the envelope is gone)" % (invocation_id, runner_dir),
+            file=sys.stderr,
+        )
+
+    if orphans:
+        print("clodex-state: %d orphaned invocation(s) — attach each block to "
+              "your next append" % orphans, file=sys.stderr)
+        return EXIT_REFUSED
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
 # boundary check — did the tree stay inside the contract?
 # --------------------------------------------------------------------------- #
 
@@ -922,6 +999,9 @@ def main(argv=None):
         ("boundary-check", _cmd_boundary_check,
          "classify every changed path in the run's repo: owned / acknowledged / "
          "profile / STRAY; exit 1 on strays"),
+        ("telemetry-sync", _cmd_telemetry_sync,
+         "print a ready-to-attach codex block for every envelope the log has "
+         "no record of; exit 1 when any was printed"),
         ("unlock", _cmd_unlock, "remove the session lock of a holder that is no longer running"),
     ):
         sub = subcommands.add_parser(name, help=help_text)
@@ -932,6 +1012,11 @@ def main(argv=None):
                 help="the event as an inline JSON argument instead of stdin — "
                      "for single events that would otherwise need a temp file; "
                      "payloads containing quotes are still safer as files",
+            )
+        if name == "telemetry-sync":
+            sub.add_argument(
+                "runner_dir",
+                help="the runner state root holding <role>/<id>.envelope.json files",
             )
         if name == "boundary-check":
             sub.add_argument(

@@ -106,6 +106,24 @@ round that found nothing still gets one: put it on the event its clean result
 unlocked (`plan:approved`, `batch:reviewed`), or the log cannot tell "reviewed
 clean" from "never reviewed".
 
+**Copied, never estimated.** `duration_s` is the envelope's `exit.duration_ms`
+over 1000, and `status` is the envelope's `status` — never a number you
+remember, never a state you assert. Estimated durations ran 1.1–1.8× actuals
+the first weekend this was tested at scale, and two logs contradicted their
+envelopes' status outright. And because the attach discipline itself fails
+under load — seven completed invocations went unrecorded that same weekend —
+every stage reconciles at its exit step:
+
+```bash
+python3 "$STATE" telemetry-sync "$RUN_DIR" "$REPO/.clodex/runner"
+```
+
+Exit 1 means it printed one ready-to-attach `codex` block per orphaned
+envelope, every field copied from disk. Attach each block to an event that
+stage still appends — any event carries one `codex` block. The diff is
+recomputable, so a block with no carrier left is not hand-carried in prose: it
+surfaces again at the next stage's reconcile, whose own appends can carry it.
+
 `finding:recorded` additionally takes `severity`, `summary`, `round`,
 `invocation` and `plan_hash` — see `clodex-plan` §9.
 

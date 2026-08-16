@@ -682,6 +682,13 @@ Anything that command prints is done. Declare the rest.
 
 `clodex-verify` reads this list; do not describe or pre-empt what it does with it.
 
+**Reconcile telemetry first** — `python3 "$STATE" telemetry-sync "$RUN_DIR"
+"$REPO/.clodex/runner"` (`clodex` → Telemetry). Attach every block it prints
+across the appends this section is about to make (`finding:disposed`,
+`verification:declared`, `plan:approved` — one block per event): a review
+round whose record is missing here is a round the run never provably spent.
+`duration_s` and `status` in those blocks are the envelope's, never yours.
+
 **The approval message** — one message, and for most runs the only gate this
 stage spends:
 

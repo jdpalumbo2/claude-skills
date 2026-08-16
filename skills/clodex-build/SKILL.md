@@ -986,6 +986,14 @@ criterion 5, which it cannot see.
    batch ids you passed in. An item you neither built nor amended is not an exit;
    it is §11.
 
+**Reconcile telemetry** before you hand off: `python3 "$STATE" telemetry-sync
+"$RUN_DIR" "$REPO/.clodex/runner"` (`clodex` → Telemetry). Every implementer
+and review leg this stage ran must have its `codex` block in the log —
+`duration_s` and `status` copied from the envelope, never estimated or
+asserted. Attach each printed block to an append you still make; a block with
+no carrier left surfaces again at verify's reconcile, so nothing is carried in
+prose.
+
 Then hand off the way the router does: invoke `clodex-verify` and give it the
 absolute run directory — *"clodex-verify, run dir
 `<repo>/.clodex/r-2026-08-11-a`"*. Tell it the branch you are on if §4 created

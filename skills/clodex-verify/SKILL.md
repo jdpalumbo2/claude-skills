@@ -240,6 +240,13 @@ repeats it to ship.
 
 ## 5. Produce evidence, class by class
 
+**Reconcile telemetry first** — `python3 "$STATE" telemetry-sync "$RUN_DIR"
+"$REPO/.clodex/runner"` (`clodex` → Telemetry). An orphan build left behind, or
+a worker round this stage runs, gets its printed `codex` block attached to one
+of the evidence appends below — `duration_s` and `status` copied from the
+envelope, never estimated or asserted. This is the stage's last stop with
+plenty of carriers; run it now, not at exit.
+
 Walk the declared list from §3. For each class, do the recipe, then append one
 item — and only for classes not already covered (§1):
 
@@ -739,6 +746,10 @@ that decision, not a second line of defence for it.
 ---
 
 ## 11. Exit
+
+Run `python3 "$STATE" telemetry-sync "$RUN_DIR" "$REPO/.clodex/runner"` once
+more; it should now print nothing (§5 attached everything). A block it does
+print rides ship's appends — say nothing about it in prose.
 
 `VERIFY COMPLETE`, then hand off the way the router does: invoke `clodex-ship`
 and give it the absolute run directory — *"clodex-ship, run dir
