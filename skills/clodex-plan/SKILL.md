@@ -13,7 +13,8 @@ event log:
 1. A **plan file** in the repo, at the profile's plans directory.
 2. `plan:recorded` (or `plan:amended`) carrying that file's **version, path, and
    sha256 hash**.
-3. Every plan-review **finding disposed** — `fixed`, `accepted`, or `rejected`.
+3. Every plan-review **finding disposed** — `fixed`, `accepted`, `rejected`, or
+   `deferred-to-build`.
 4. `verification:declared` for each evidence class, then `plan:approved` **bound
    to the current plan hash**.
 
@@ -510,7 +511,7 @@ converges when all three hold:
 1. it is `complete`, and
 2. it hashed the current plan (`reviewed this exact plan: True`), and
 3. every blocker/high/medium finding it returned is a **restatement of one
-   already disposed** as `accepted` or `rejected`.
+   already disposed** as `accepted`, `rejected`, or `deferred-to-build`.
 
 Zero blocker/high/medium findings is the ordinary case and satisfies (3)
 vacuously. A round that re-reports a finding the user already accepted is
@@ -551,14 +552,18 @@ flag the accepted item again; it is decided, and reporting it will not change
 the plan.
 ```
 
-**When the reviewer keeps finding new things.** Cap the loop at **3 rounds**.
-A fourth round is not the answer — a reviewer still surfacing blockers on round
-3 is telling you the plan is under-specified or the scope is wrong, and more
-rounds spend money to hear it again. Stop and take it to the user in one
-message: what keeps coming back, whether each item is a restatement of something
-already disposed or genuinely new, and the three ways out — keep iterating (say
-how many more rounds and why), accept the open findings as `accepted`
-dispositions, or re-scope the plan and start the loop over from round 1.
+**When the reviewer keeps finding new things.** The exit condition is the
+**severity trend**, not a round count: the loop is done when a round produces
+zero blocker/high findings after dispositions. Falling finding counts are not
+that — a pilot run's counts fell 8, 6, 5, 4, 3 while round 4 caught a defect
+that would have shipped silent data corruption, so "three rounds is enough" was
+wrong the one time it was tested. What a round-3 check *is* for: when
+blockers/highs are still arriving, stop spending silently and take it to the
+user in one message — what keeps coming back, whether each item is a
+restatement of something already disposed or genuinely new, and the ways out:
+keep iterating (say how many more rounds and why), dispose the open findings
+(`accepted`/`rejected` need their word; `deferred-to-build` is yours when §9's
+test holds), or re-scope the plan and start the loop over from round 1.
 
 ---
 
@@ -595,7 +600,7 @@ findings still has to be recorded, or the log cannot tell a clean round from a
 round that never ran: put its `codex` block on the `plan:approved` event (§10),
 or on the `plan:amended` if something else forced one.
 
-Then dispose it. Every recorded finding reaches one of exactly three
+Then dispose it. Every recorded finding reaches one of exactly four
 dispositions — nothing is dropped, and "we talked about it" is not a state:
 
 | Disposition | Means | Who decides |
@@ -603,6 +608,7 @@ dispositions — nothing is dropped, and "we talked about it" is not a state:
 | `fixed` | the plan was changed to address it — so this implies an amendment (§6) and a new hash, and §6's materiality test decides whether the review loop re-opens | you |
 | `accepted` | legitimate, and the user chose not to act on it. It stands as a known risk and **survives into ship** | the user, explicitly |
 | `rejected` | wrong — the reviewer misread the repo or the ask | the user, explicitly |
+| `deferred-to-build` | true, but implementation detail rather than a plan defect — the plan is right; the finding is about how the owning batch should build it | you |
 
 ```json
 {"e": "finding:disposed", "id": "r1-F001", "disposition": "fixed",
@@ -612,7 +618,14 @@ dispositions — nothing is dropped, and "we talked about it" is not a state:
 `accepted` and `rejected` are overrides of an independent review, which is a
 human-owned decision. Propose them — do not append them until the user has said
 so, and quote their words in `note`. `fixed` is your own work and needs no
-approval. The snapshot keeps everything `finding:recorded` carried — id, source,
+approval.
+
+`deferred-to-build` is yours the way `fixed` is, but it is narrow: the finding
+must be **true** and belong to implementation, not to the plan — a plan defect
+deferred is a plan defect shipped. Its `note` must name the batch that answers
+it, because deferral moves a finding, never deletes one: `clodex-build` §6
+re-surfaces every deferred finding in the owning batch's prompt when that batch
+opens, so what you defer is read again at exactly the moment it is actionable. The snapshot keeps everything `finding:recorded` carried — id, source,
 disposition, severity, summary, round, invocation, plan hash — while the
 disposition's `note` lives in the event log, which is the authoritative record.
 
@@ -706,7 +719,8 @@ three** hold — and this is answerable from the manifest alone:
 2. `approvals` contains an entry with `scope: "plan"`, `plan_hash` equal to
    `plan.hash`, and `revoked: null`.
 3. No entry in `findings` with `source: "plan-reviewer"` has
-   `disposition: "open"`. Every one is `fixed`, `accepted`, or `rejected`.
+   `disposition: "open"`. Every one is `fixed`, `accepted`, `rejected`, or
+   `deferred-to-build`.
 
 Plus, when the direction gate was **yes**, a fourth: an `approvals` entry with
 `scope: "direction"`, the same `plan_hash`, and `revoked: null`.
@@ -757,5 +771,6 @@ file or in the log, or it does not exist.
 | Asking a question a file answers | Ground first (§2). Only blocking or decision-bearing questions reach the user. |
 | Running the direction checkpoint for a data or refactor change | The gate is a predicate (§4), not a mood. `no` means no checkpoint. |
 | Marking a finding `accepted` because it seemed minor | Only the user accepts or rejects a finding. Propose it in the approval message. |
+| Disposing a plan defect as `deferred-to-build` to end the loop | Deferral is only for findings that are true **and** implementation detail (§9). A defect in scope, batches, or evidence is `fixed` or goes to the user. The note names the owning batch, and build re-surfaces it there. |
 | Writing forbidden paths, batch contracts, or code | That is `clodex-build`. This stage declares owned paths and done-when. |
 | Inventing an event name | The vocabulary is frozen at 23 names; the reducer refuses anything else. This stage appends eight of them: `stage:plan:entered`, `plan:recorded`, `plan:amended`, `approval:granted`, `finding:recorded`, `finding:disposed`, `verification:declared`, `plan:approved`. Something the names do not cover is a **field** on one of them — the optional `preflight` and `codex` blocks, and `finding:recorded`'s `severity`/`summary`/`round`/`invocation`/`plan_hash` (`clodex` → Telemetry). |

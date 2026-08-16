@@ -338,6 +338,12 @@ Ids are unique for the life of the run: a second `batch:opened` with the same id
 is refused — *"batch 1 is already open"*. A batch is never re-opened; work that
 has to be redone gets a **new** batch (§11).
 
+Before you write the prompt, read the manifest's `findings` for entries with
+`disposition: "deferred-to-build"` whose note names this batch. Each one goes
+into the prompt's "What to build" as an explicit item — plan review deferred it
+to exactly this moment, and a deferred finding the batch never sees was
+silently dropped, not deferred.
+
 Write the prompt to `$RUN_DIR/batch-<N>.prompt.md` with your file-writing tool —
 never as a shell string. It has exactly these parts, in this order:
 
