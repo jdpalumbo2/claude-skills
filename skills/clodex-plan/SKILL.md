@@ -286,6 +286,18 @@ Owned paths are the only paths that batch may touch. They must be disjoint
 across batches. Include this plan file itself in a batch — otherwise ship, which
 commits run-owned paths only, will leave it uncommitted.
 
+Release-owned — no batch may own these:
+- version source: `<the profile's version.source, e.g. package.json>`
+- changelog: `<every file under the profile's changelog.path>`
+- tags: `<the profile's tag format, or "tagging off">`
+
+Print the set resolved from the profile, the way `clodex-build` §2 derives it —
+not the rule in the abstract. The changelog, the version source, and tags belong
+to `clodex-ship`, which closes them from evidence inside the release
+authorization; build categorically forbids them whatever the plan says, so a
+batch that owns one is a plan defect that otherwise surfaces at the first line
+of build — after every review round has passed it.
+
 ## Evidence
 | Class | What will prove it |
 |---|---|
