@@ -576,6 +576,8 @@ Record each finding from a `complete` round **before** acting on it:
 ```json
 {"e": "finding:recorded", "id": "r1-F001", "source": "plan-reviewer",
  "severity": "high", "summary": "<one line, verbatim from the envelope>",
+ "location": "<the envelope finding's location, verbatim>",
+ "detail": "<the envelope finding's detail, verbatim>",
  "round": 1, "invocation": "<the envelope's invocation id>",
  "plan_hash": "<plan.hash this round reviewed>",
  "codex": {"invocation_id": "<same>", "role": "plan-reviewer", "round": 1,
@@ -585,6 +587,14 @@ Record each finding from a `complete` round **before** acting on it:
 
 `source` is the Codex **role** that produced it, from the same fixed enum that
 `required_review` draws on (§6): `plan-reviewer` here, always.
+
+**`location` and `detail` are copied from the envelope's finding verbatim** —
+they are the envelope's own field names, adopted so nothing is re-worded on
+the way into state. The overturn authority that gates accepted findings reads
+the manifest, not the envelopes; a finding recorded without them gives that
+gate one sentence and no file:line to rule from. A `recommendation` is carried
+the same way when the source gave one. (The engine refuses a finding with an
+empty `severity` or `summary`, and a Codex-sourced one without `invocation`.)
 
 **Namespace the id by round.** Envelope ids (`F001`, `F002`, …) are unique only
 within one invocation, so round 2's `F001` collides with round 1's and the
@@ -630,8 +640,10 @@ re-surfaces every deferred finding in the owning batch's prompt when that batch
 opens, so what you defer is read again at exactly the moment it is actionable.
 
 The snapshot keeps everything `finding:recorded` carried — id, source,
-disposition, severity, summary, round, invocation, plan hash — while the
-disposition's `note` lives in the event log, which is the authoritative record.
+disposition, severity, summary, location, detail, recommendation, round,
+invocation, plan hash — and the disposition's `note` is promoted into it too,
+so the gate that reads the manifest sees the grounds. The event log remains
+the authoritative record.
 
 **Severity does not restrict disposition.** A `blocker` the user decides to live
 with is `accepted` — that is exactly what an override is, and it is a legitimate
@@ -784,4 +796,4 @@ file or in the log, or it does not exist.
 | Marking a finding `accepted` because it seemed minor | Only the user accepts or rejects a finding. Propose it in the approval message. |
 | Disposing a plan defect as `deferred-to-build` to end the loop | Deferral is only for findings that are true **and** implementation detail (§9). A defect in scope, batches, or evidence is `fixed` or goes to the user. The note names the owning batch, and build re-surfaces it there. |
 | Writing forbidden paths, batch contracts, or code | That is `clodex-build`. This stage declares owned paths and done-when. |
-| Inventing an event name | The vocabulary is frozen at 23 names; the reducer refuses anything else. This stage appends eight of them: `stage:plan:entered`, `plan:recorded`, `plan:amended`, `approval:granted`, `finding:recorded`, `finding:disposed`, `verification:declared`, `plan:approved`. Something the names do not cover is a **field** on one of them — the optional `preflight` and `codex` blocks, and `finding:recorded`'s `severity`/`summary`/`round`/`invocation`/`plan_hash` (`clodex` → Telemetry). |
+| Inventing an event name | The vocabulary is frozen at 23 names; the reducer refuses anything else. This stage appends eight of them: `stage:plan:entered`, `plan:recorded`, `plan:amended`, `approval:granted`, `finding:recorded`, `finding:disposed`, `verification:declared`, `plan:approved`. Something the names do not cover is a **field** on one of them — the optional `preflight` and `codex` blocks, and `finding:recorded`'s `severity`/`summary`/`location`/`detail`/`recommendation`/`round`/`invocation`/`plan_hash` (`clodex` → Telemetry). |

@@ -671,6 +671,8 @@ Namespace ids by batch, because the runner mints `F001` fresh every invocation:
 ```json
 {"e": "finding:recorded", "id": "b1-F001", "source": "code-reviewer",
  "severity": "high", "summary": "<one line, verbatim from the envelope>",
+ "location": "<the envelope finding's location, verbatim>",
+ "detail": "<the envelope finding's detail, verbatim>",
  "invocation": "<the envelope's invocation id>",
  "codex": {"invocation_id": "<same>", "role": "code-reviewer",
            "status": "complete", "envelope": "<path>",

@@ -146,6 +146,44 @@ class FindingValidationAtAppendTime(ClodexCheck):
         result = self.append(run_dir, event)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_exploit_enrichment_fields_reach_the_snapshot(self):
+        # 2.7 — the CRE overturn authority got `severity | None | one sentence`
+        # from state for all eight findings it gated, while every envelope
+        # carried file:line. The envelope's own field names now survive the
+        # reduction instead of being silently dropped by the whitelist.
+        run_dir = self.make_run()
+        result = self.append(run_dir, self.finding(
+            location="services/extraction/primer/job.py:142",
+            detail="the poll transport re-reads the flag inside the loop",
+            recommendation="use the Cloud-Run-job pattern already live in this repo",
+        ))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        finding = self.rebuild(run_dir)["findings"][0]
+        self.assertEqual(finding["location"], "services/extraction/primer/job.py:142")
+        self.assertIn("poll transport", finding["detail"])
+        self.assertIn("Cloud-Run-job", finding["recommendation"])
+
+    def test_exploit_disposition_note_reaches_the_snapshot(self):
+        # 2.7 — acceptance grounds lived only in the event log, invisible to
+        # the manifest-reading gate.
+        run_dir = self.make_run()
+        self.append(run_dir, self.finding())
+        result = self.append(run_dir, {
+            "e": "finding:disposed", "id": "r1-F001", "disposition": "accepted",
+            "note": "user: acceptable for the launch window; revisit in p3",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        finding = self.rebuild(run_dir)["findings"][0]
+        self.assertEqual(finding["disposition"], "accepted")
+        self.assertIn("launch window", finding["note"])
+
+    def test_control_enrichment_fields_not_given_stay_absent(self):
+        run_dir = self.make_run()
+        self.append(run_dir, self.finding())
+        finding = self.rebuild(run_dir)["findings"][0]
+        for key in ("location", "detail", "recommendation", "note"):
+            self.assertNotIn(key, finding)
+
     def test_control_old_logs_with_bare_findings_still_reduce(self):
         # The rule binds new appends only: an archived log written before the
         # rule must rebuild unchanged.

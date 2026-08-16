@@ -504,6 +504,8 @@ Record it before acting on it. Namespace ids by stage, because the runner mints
 ```json
 {"e": "finding:recorded", "id": "v-F001", "source": "code-reviewer",
  "severity": "high", "summary": "<one line, verbatim from the envelope>",
+ "location": "<the envelope finding's location, verbatim>",
+ "detail": "<the envelope finding's detail, verbatim>",
  "invocation": "<the envelope's invocation id>",
  "codex": {"invocation_id": "<same>", "role": "code-reviewer",
            "status": "complete", "envelope": "<path>", "duration_s": 180}}

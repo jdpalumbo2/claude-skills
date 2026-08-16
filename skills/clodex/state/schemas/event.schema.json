@@ -87,6 +87,10 @@
       "description": "finding:recorded only. Free string, because the vocabulary is the source's: plan review grades blocker/high/medium/low/info, code review Critical/Important/Minor."
     },
     "summary": {"type": ["string", "null"], "description": "finding:recorded only: one line naming the defect."},
+    "location": {"type": ["string", "null"], "description": "finding:recorded only: file:line or a section heading, copied verbatim from the envelope's finding. Empty when the finding is not tied to a place."},
+    "detail": {"type": ["string", "null"], "description": "finding:recorded only: why it is wrong and what it breaks, copied verbatim from the envelope's finding."},
+    "recommendation": {"type": ["string", "null"], "description": "finding:recorded only: the proposed fix, where the source gave one."},
+    "note": {"type": ["string", "null"], "description": "finding:disposed only: the disposition's grounds — the user's words for accepted/rejected, the owning batch for deferred-to-build. Promoted to the snapshot."},
     "round": {"type": ["integer", "null"], "description": "finding:recorded only: the review round that raised it."},
     "invocation": {"type": ["string", "null"], "description": "finding:recorded only: the `codex.invocation_id` that raised it."},
     "plan_hash": {

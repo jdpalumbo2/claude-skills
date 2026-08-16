@@ -795,8 +795,12 @@ class FixtureTests(StateTestCase):
     """The pilot run's own event log, redacted but structurally untouched.
 
     `legacy-run` is that log as it stood before any of the telemetry fields
-    were read by anything; its snapshot is committed as a golden. Nothing may
-    ever change those bytes — that is what makes the telemetry additive.
+    were read by anything; its snapshot is committed as a golden. The EVENT
+    bytes never change — that is what makes the telemetry additive: a field
+    the events do not carry never appears in the reduction. The golden itself
+    is regenerated when the reducer deliberately starts reading a field the
+    events always carried (v0.2: `finding:disposed.note`, promoted so the
+    overturn authority can rule from the manifest).
     """
 
     FIXTURES = HERE / "fixtures"

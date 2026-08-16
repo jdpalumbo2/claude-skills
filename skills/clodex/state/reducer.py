@@ -342,7 +342,12 @@ def _on_finding_recorded(snap, event):
     # `round` and `invocation` are what let a reader see the severity trend
     # across rounds; `plan_hash` is which version the finding was raised
     # against, which the run's own id convention used to be the only trace of.
-    for key in ("severity", "summary", "round", "invocation", "plan_hash"):
+    # `location`/`detail`/`recommendation` are the envelope's own field names,
+    # copied through so an overturn authority can rule from the manifest alone
+    # — the first project to gate on accepted findings got one sentence each
+    # from state while every envelope carried file:line.
+    for key in ("severity", "summary", "location", "detail", "recommendation",
+                "round", "invocation", "plan_hash"):
         if key in event:
             finding[key] = event[key]
     snap["findings"].append(finding)
@@ -351,6 +356,11 @@ def _on_finding_recorded(snap, event):
 def _on_finding_disposed(snap, event):
     finding = _find(snap["findings"], "id", event.get("id"), event, "finding")
     finding["disposition"] = event.get("disposition")
+    # The disposition's grounds reach the snapshot too: acceptance grounds that
+    # live only in the event log are invisible to the gate that reads the
+    # manifest. Carried only when given, so old logs reduce unchanged.
+    if "note" in event:
+        finding["note"] = event["note"]
 
 
 def _verification_bucket(bucket):

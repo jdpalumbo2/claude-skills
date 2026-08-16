@@ -124,8 +124,12 @@ stage still appends — any event carries one `codex` block. The diff is
 recomputable, so a block with no carrier left is not hand-carried in prose: it
 surfaces again at the next stage's reconcile, whose own appends can carry it.
 
-`finding:recorded` additionally takes `severity`, `summary`, `round`,
-`invocation` and `plan_hash` — see `clodex-plan` §9.
+`finding:recorded` additionally takes `severity`, `summary`, `location`,
+`detail`, `recommendation`, `round`, `invocation` and `plan_hash` — `location`
+and `detail` copied verbatim from the envelope's finding, so the manifest can
+answer *where* and *why* without anyone opening envelopes — and
+`finding:disposed`'s `note` is promoted into the snapshot beside them. See
+`clodex-plan` §9.
 
 ---
 

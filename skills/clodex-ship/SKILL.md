@@ -317,7 +317,9 @@ debt (§5). It is not swept up silently and it is not invisible at release:
 ```json
 {"e": "finding:recorded", "id": "s-F001", "source": "ship",
  "severity": "medium",
- "summary": "commit 4f21ab9 'fix: null guard in parser' is in this release and no batch owns it"}
+ "summary": "commit 4f21ab9 'fix: null guard in parser' is in this release and no batch owns it",
+ "location": "4f21ab9",
+ "detail": "release bound start_head..HEAD contains this commit; no batch's owned paths account for it"}
 ```
 
 Then the user says what it is, in their words, and you dispose it:
