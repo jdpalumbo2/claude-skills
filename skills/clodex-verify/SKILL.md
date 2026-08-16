@@ -293,6 +293,14 @@ evidence must also include the **test-inventory diff** build §8 produced (or
 produce one now: test names pre vs post, diffed). Counts survive a silently
 deleted test; the name list does not.
 
+When the suite is Python, `result` must also carry the **resolved module
+path** — `python3 -c 'import <package>; print(<package>.__file__)'` — proving
+the gate imported *this checkout's* code. In a worktree wired up with
+symlinked venvs, a suite can run green against the parent checkout's copy of
+the package; the counts look identical and the gate proves someone else's
+tree. The printed `__file__` is what tells them apart, and an evidence item
+without it does not prove what it claims in any multi-checkout repo.
+
 Debt when: the profile's `commands.test` is null and no suite exists to run, or
 the suite cannot run in this environment (a missing toolchain the router's
 preflight did not cover).

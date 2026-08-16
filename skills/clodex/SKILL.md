@@ -245,6 +245,19 @@ costs one `ls`.
    → stop; it fails later and more expensively inside a stage. An empty list is
    a legal answer (this repo pins no runtimes); a *missing* `runtimes` key is a
    profile that never answered the question — go fix it in §3.
+
+   **In a worktree, a missing prerequisite gets an offer — never an auto-run,
+   never a shrug.** The profile's `commands.install` is required by the
+   schema, filled at the interview, and executed by nothing — while every
+   lane rediscovers the same folklore (symlinked env files, a venv built from
+   the parent checkout) by hand. When this check, or a dry probe of the test
+   command, shows dependencies, a venv, or an env file absent in a worktree:
+   **offer** to run `commands.install`, and offer to materialize the env
+   files the main checkout carries (symlink or copy; the user names which
+   files, and their contents are never read or printed). Run either only
+   after the user says yes. Preflight's charter stays proof, not
+   construction — the offer is the construction path, and it is theirs to
+   take.
 5. **Codex auth.** `command -v codex`, then `codex login status` (expect exit 0
    and a logged-in line). Codex is not optional: plan review is default-on and
    build delegates to it. Not logged in → stop and ask the user to run
