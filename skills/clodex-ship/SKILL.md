@@ -455,37 +455,51 @@ python3 - "$PROFILE" "$BRANCH" "$REMOTE" <<'PY'
 import json, sys
 prof, branch, remote = json.load(open(sys.argv[1])), sys.argv[2], sys.argv[3]
 cl, ver, tag, dep = prof.get("changelog"), prof["version"], prof["tag"], prof["deploy"]
+external = prof.get("release_owner") == "external"
 writes = [p for p in ((cl or {}).get("path"), ver.get("source")) if p]
 n = 0
 def step(name, detail):
     global n; n += 1; print("  %d %-12s %s" % (n, name, detail))
-if writes:
-    step("bookkeeping", "write " + ", ".join(writes) + " (one timestamp, chosen once)")
-    step("commit", "git commit -- " + " ".join(writes))
+if external:
+    # The orchestrated-lane shape: bookkeeping, commit, tag and deploy belong
+    # to the external owner. The run's release machinery reduces to publishing
+    # the reviewed branch; its deliverable is the branch plus the handoff
+    # artifact (§7A), and it ends `handed-off` (§9).
+    print("  release_owner: external — the release machinery is not this run's.")
+    print("  (bookkeeping, commit, tag, deploy: the external owner's, cut in the authorization)")
+    if remote:
+        step("push", "branch %s to %s — needs an action id from the list below" % (branch, remote))
+    else:
+        print("  (no remote — the reviewed branch stays local; the handoff artifact says so)")
+    print("  handoff artifact (§7A) — written into the run dir; not a release step")
 else:
-    print("  (no changelog and no version source — nothing to write, no release commit)")
-if tag["enabled"]:
-    step("tag", "format %s, annotated, on the release commit" % tag["format"])
-if remote:
-    step("push", "branch %s to %s — needs an action id from the list below" % (branch, remote))
-else:
-    print("  (no remote — nothing to push; the release stays on this machine)")
-if dep is None:
-    print("  (deploy: null — this repo does not deploy: the run closes at not-deployed)")
-elif dep["trigger"] == "auto-on-push":
-    step("deploy", "%s, triggered by the push itself — no separate command" % dep["target"])
-elif dep["trigger"] == "manual-command":
-    step("deploy", "%s — needs an action id from the list below" % dep["target"])
-else:
-    # NOT a step. §5 and §10 both derive the step list as auto-on-push or
-    # manual-command only, so counting it here made three derivations into two
-    # answers: a deploy descriptor §5 never checked but §6 would have run.
-    print("  (deploy.trigger external — someone outside clodex deploys %s: not-deployed)"
-          % dep["target"])
-if dep and dep["verify_live"]:
-    step("verify-live", "; ".join("%s: %s" % (c["name"], c["check"]) for c in dep["verify_live"]))
-elif dep is not None:
-    print("  (deploy.verify_live is empty — this repo cannot prove a release is live: see §7.6)")
+    if writes:
+        step("bookkeeping", "write " + ", ".join(writes) + " (one timestamp, chosen once)")
+        step("commit", "git commit -- " + " ".join(writes))
+    else:
+        print("  (no changelog and no version source — nothing to write, no release commit)")
+    if tag["enabled"]:
+        step("tag", "format %s, annotated, on the release commit" % tag["format"])
+    if remote:
+        step("push", "branch %s to %s — needs an action id from the list below" % (branch, remote))
+    else:
+        print("  (no remote — nothing to push; the release stays on this machine)")
+    if dep is None:
+        print("  (deploy: null — this repo does not deploy: the run closes at not-deployed)")
+    elif dep["trigger"] == "auto-on-push":
+        step("deploy", "%s, triggered by the push itself — no separate command" % dep["target"])
+    elif dep["trigger"] == "manual-command":
+        step("deploy", "%s — needs an action id from the list below" % dep["target"])
+    else:
+        # NOT a step. §5 and §10 both derive the step list as auto-on-push or
+        # manual-command only, so counting it here made three derivations into two
+        # answers: a deploy descriptor §5 never checked but §6 would have run.
+        print("  (deploy.trigger external — someone outside clodex deploys %s: not-deployed)"
+              % dep["target"])
+    if dep and dep["verify_live"]:
+        step("verify-live", "; ".join("%s: %s" % (c["name"], c["check"]) for c in dep["verify_live"]))
+    elif dep is not None:
+        print("  (deploy.verify_live is empty — this repo cannot prove a release is live: see §7.6)")
 print("profile actions available (nothing outside this list may be proposed):")
 for a in prof["actions"]:
     print("  %-22s %-24s argv: %s | cwd: %s | target: %s | env: %s"
@@ -494,6 +508,14 @@ for a in prof["actions"]:
              ", ".join(a.get("env_refs") or []) or "none"))
 PY
 ```
+
+Under `release_owner: "external"` the three settle-questions below shrink to
+one — which action id performs the push, when there is a remote. There is no
+version to propose (the external owner bumps it) and no deploy branch question
+(nothing here deploys). Note what this is **not**: not a `cut`. Cutting drops
+a step this release *has*; under an external owner, bookkeeping, commit, tag
+and deploy were never this release's steps, so §5 and §10 derive a list that
+never contains them — the same one derivation, in all three places.
 
 Then settle the three things the profile cannot settle on its own:
 
@@ -834,16 +856,23 @@ try:
 except subprocess.CalledProcessError:
     remote = (subprocess.check_output(["git", "remote"], cwd=snap["repo"]).decode().split() or [""])[0]
 STEP_LIST = []
-if src or cl:
-    STEP_LIST += ["bookkeeping", "commit"]
-if prof["tag"]["enabled"]:
-    STEP_LIST += ["tag"]
-if remote:
-    STEP_LIST += ["push"]
-if dep is not None and dep["trigger"] in ("auto-on-push", "manual-command"):
-    STEP_LIST += ["deploy"]
-if dep is not None and dep["verify_live"]:
-    STEP_LIST += ["verify-live"]
+if prof.get("release_owner") == "external":
+    # The orchestrated-lane shape (§4): only the branch publish is the run's.
+    # Bookkeeping, commit, tag and deploy were never this release's steps, so
+    # they are not derived and not cut.
+    if remote:
+        STEP_LIST += ["push"]
+else:
+    if src or cl:
+        STEP_LIST += ["bookkeeping", "commit"]
+    if prof["tag"]["enabled"]:
+        STEP_LIST += ["tag"]
+    if remote:
+        STEP_LIST += ["push"]
+    if dep is not None and dep["trigger"] in ("auto-on-push", "manual-command"):
+        STEP_LIST += ["deploy"]
+    if dep is not None and dep["verify_live"]:
+        STEP_LIST += ["verify-live"]
 # verify-live is reads, and an auto-on-push deploy runs no command (§7.5): those
 # two are steps without descriptors by design, and only those two.
 NEEDS_DESCRIPTOR = [st for st in STEP_LIST if st != "verify-live"
@@ -1026,8 +1055,14 @@ for st in cut:
     if st not in NEEDS_DESCRIPTOR:
         problems.append("step %r is cut, but it never needed a descriptor" % st)
 
-# A repo that writes nothing has nothing to book-keep and nothing to commit.
-if not (src or cl):
+# A repo that writes nothing has nothing to book-keep and nothing to commit —
+# and under an external release owner those steps are not this run's at all.
+if prof.get("release_owner") == "external":
+    for x in payload.get("actions", []):
+        if x.get("id") in ("bookkeeping", "release-commit", "release-tag"):
+            problems.append("%s: release_owner is external — this run's release has no such "
+                            "step, and the external owner writes those files (§4)" % x["id"])
+elif not (src or cl):
     for x in payload.get("actions", []):
         if x.get("id") in ("bookkeeping", "release-commit"):
             problems.append("%s: this repo has no changelog and no version source, so there is "
@@ -1903,6 +1938,7 @@ the next session will act on.
 |---|---|---|
 | `verified-live` | the release is out and something proved it is serving | **terminal** → `run:closed` |
 | `not-deployed` | the release exists and this run did not put it live, on purpose | **terminal** → `run:closed` |
+| `handed-off` | the run's deliverable is a reviewed branch and a handoff artifact; the release is externally owned (`release_owner: "external"`) | **terminal** → `run:closed` |
 | `abandoned` | the user called the release off | **terminal** → `run:closed` |
 | `push-failed` | the remote did not advance | **resumable** — do not close |
 | `deploy-failed` | the deploy did not land, or nothing proved it did | **resumable** — do not close |
@@ -1945,6 +1981,36 @@ what did not happen and says nothing about why, which is the one thing the
 manifest is being asked for. Refusing it means every unnamed step blocks, which
 is the right way round.
 
+### `handed-off` is the orchestrated lane's honest ending
+
+A fully successful lane whose manifest says `release: abandoned` is actively
+misleading to every future reader — and before this state existed, four of
+five successful lanes in one weekend were forced to record exactly that, each
+writing near-identical "by design" prose to compensate. `handed-off` says what
+actually happened: the work is done, reviewed, and published as a branch; the
+release belongs to someone else.
+
+It is legal only when **both** hold, and §10 blocks on each:
+
+1. the profile says `release_owner: "external"` — the shape is declared, not
+   improvised per run;
+2. a **handoff artifact** is written and recorded (§7A) — the branch, its
+   base, the merge conditions, the deploy actions, the accepted residuals.
+   A handoff with no artifact is a clipboard, not a deliverable.
+
+Record it with the artifact referenced, so the manifest points at the thing
+the external owner consumes:
+
+```json
+{"e": "release:updated", "state": "handed-off",
+ "deployed": "handoff: <run-dir-relative artifact path>"}
+```
+
+When this release had a `push` step and it did not run, the `skipped:` grammar
+below still applies — put the handoff reference after the `|` with the reason.
+The authoritative record of the artifact is the `approval:granted` with
+`scope: "handoff"` (§7A); `deployed` is the human-facing pointer.
+
 **`skipped:` is not the other half of `cut`, and §10 does not cross-check them.**
 They answer different questions at different gates:
 
@@ -1984,7 +2050,8 @@ import json, re, subprocess, sys
 state, run_dir, profile_path = sys.argv[1], sys.argv[2], sys.argv[3]
 snap = json.loads(subprocess.check_output(["python3", state, "rebuild", run_dir]))
 rel, blockers = snap["release"], []
-TERMINAL, RESUMABLE = ("verified-live", "not-deployed", "abandoned"), ("push-failed", "deploy-failed")
+TERMINAL = ("verified-live", "not-deployed", "handed-off", "abandoned")
+RESUMABLE = ("push-failed", "deploy-failed")
 
 for s in rel["steps"]:
     print("step %-12s %-8s reconciled=%-5s %s" % (s["step"], s["status"], s["reconciled"], s["op_id"]))
@@ -2034,17 +2101,23 @@ try:
 except subprocess.CalledProcessError:
     remote = (subprocess.check_output(["git", "remote"], cwd=snap["repo"]).decode().split() or [""])[0]
 dep = prof["deploy"]
+external = prof.get("release_owner") == "external"
 authorized = []
-if prof["version"]["source"] or (prof.get("changelog") or {}).get("path"):
-    authorized += ["bookkeeping", "commit"]
-if prof["tag"]["enabled"]:
-    authorized += ["tag"]
-if remote:
-    authorized += ["push"]
-if dep is not None and dep["trigger"] in ("auto-on-push", "manual-command"):
-    authorized += ["deploy"]
-if dep is not None and dep["verify_live"]:
-    authorized += ["verify-live"]
+if external:
+    # Same derivation as §4 and §5: only the branch publish is the run's.
+    if remote:
+        authorized += ["push"]
+else:
+    if prof["version"]["source"] or (prof.get("changelog") or {}).get("path"):
+        authorized += ["bookkeeping", "commit"]
+    if prof["tag"]["enabled"]:
+        authorized += ["tag"]
+    if remote:
+        authorized += ["push"]
+    if dep is not None and dep["trigger"] in ("auto-on-push", "manual-command"):
+        authorized += ["deploy"]
+    if dep is not None and dep["verify_live"]:
+        authorized += ["verify-live"]
 done_steps = {s["step"] for s in rel["steps"] if s["status"] == "done"}
 # The escape hatch is an explicit list, not prose: `deployed` may begin
 # "skipped: <step>, <step> | <why>". Substring-matching a sentence let
@@ -2085,11 +2158,23 @@ if rel["state"] in TERMINAL:
             blockers.append("step %r is part of this repo's release and never completed, and "
                             "`deployed` does not declare it skipped — say  skipped: %s | <why>  "
                             "there" % (st, st))
+    # `handed-off` is legal only in the declared shape, with the artifact.
+    handoff = [a for a in snap["approvals"] if a["scope"] == "handoff" and a["revoked"] is None]
+    if rel["state"] == "handed-off":
+        if not external:
+            blockers.append("state 'handed-off' but the profile's release_owner is not "
+                            "'external' — this shape is declared in the profile, not improvised")
+        if not handoff:
+            blockers.append("state 'handed-off' with no standing handoff approval — write the "
+                            "artifact and record it (§7A) before this terminal")
     # Every step declared skipped, none done: nothing shipped. `not-deployed`
     # means the release exists and did not go live; it does not mean there was
     # no release. A run that did nothing has an honest ending and it is
     # `abandoned` (§9) — SHIP COMPLETE here would be a green light on a no-op.
-    if rel["state"] != "abandoned" and authorized and not done_steps:
+    # Exception, by construction: a `handed-off` run's deliverable is the
+    # reviewed branch plus the artifact checked above, so zero completed steps
+    # is its normal shape, not a no-op.
+    if rel["state"] not in ("abandoned", "handed-off") and authorized and not done_steps:
         blockers.append("no step of this release completed, so nothing shipped — a run where "
                         "nothing ran is `abandoned` (§9), not %r" % rel["state"])
 elif rel["state"] in RESUMABLE:

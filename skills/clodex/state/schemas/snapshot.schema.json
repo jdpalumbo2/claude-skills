@@ -166,6 +166,7 @@
             "push-failed",
             "deploy-failed",
             "not-deployed",
+            "handed-off",
             "verified-live",
             "abandoned"
           ]
