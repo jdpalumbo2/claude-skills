@@ -21,10 +21,16 @@ STATE = CATALOGUE / "skills" / "clodex" / "state" / "clodex_state.py"
 
 
 def extract_archive_recipe():
+    # The terminator match tolerates indentation so a heredoc inside an
+    # indented markdown list elsewhere in the file ends at ITS own PY line
+    # instead of swallowing every block up to the next unindented one.
+    import textwrap
+
     text = ROUTER.read_text()
-    for match in re.finditer(r"<<'PY'\n(.*?)\nPY\n", text, re.S):
-        if "archive" in match.group(1) and "worktree" in match.group(1):
-            return match.group(1)
+    for match in re.finditer(r"<<'PY'\n(.*?)\n[ \t]*PY\n", text, re.S):
+        body = textwrap.dedent(match.group(1))
+        if "archived %d item(s)" in body:
+            return body
     raise AssertionError("cannot find the archive recipe in clodex/SKILL.md")
 
 
