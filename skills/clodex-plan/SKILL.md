@@ -547,6 +547,8 @@ Round: <N>. The plan changed since your last review.
 - r1-F003 (medium) <summary> — rejected: <the user's reason>
 - r1-F004 (blocker) <summary> — ACCEPTED by the user, deliberately not fixed:
   <their reason>
+- r1-F005 (medium) <summary> — deferred-to-build: implementation detail, not a
+  plan defect; batch <N>'s prompt re-surfaces it
 Re-check the fixes and report anything still wrong or newly introduced. You may
 flag the accepted item again; it is decided, and reporting it will not change
 the plan.
@@ -625,7 +627,9 @@ must be **true** and belong to implementation, not to the plan — a plan defect
 deferred is a plan defect shipped. Its `note` must name the batch that answers
 it, because deferral moves a finding, never deletes one: `clodex-build` §6
 re-surfaces every deferred finding in the owning batch's prompt when that batch
-opens, so what you defer is read again at exactly the moment it is actionable. The snapshot keeps everything `finding:recorded` carried — id, source,
+opens, so what you defer is read again at exactly the moment it is actionable.
+
+The snapshot keeps everything `finding:recorded` carried — id, source,
 disposition, severity, summary, round, invocation, plan hash — while the
 disposition's `note` lives in the event log, which is the authoritative record.
 
