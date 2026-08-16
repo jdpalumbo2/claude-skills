@@ -208,12 +208,38 @@ costs one `ls`.
    exist and `ANY-RUN-ID` is a stand-in, not a reserved name. Exit 1 on the
    second probe is the **pass**, not an error — run them as two separate commands
    so a shell with `set -e` cannot swallow the result.
-   Either result wrong → show the user exactly these lines and add them to
-   `.gitignore` only after they agree:
+   Either result wrong → the remedy is the **nested ignore file**,
+   `.clodex/.gitignore`, self-contained inside the directory it governs so no
+   other session's edit to the shared `.gitignore` can collide with it (that
+   collision once nearly swept 56 events into someone else's commit):
    ```
-   .clodex/*
-   !.clodex/profile.json
+   *
+   !.gitignore
+   !profile.json
    ```
+   The `!.gitignore` line lets the file exempt itself; without it the remedy
+   ignores its own carrier. Show the user, write it after they agree, and make
+   sure it gets **committed** (§3 step 4 commits it beside the profile) — an
+   uncommitted nested file does not exist in a fresh worktree, which is exactly
+   where run state most needs ignoring. Root-`.gitignore` lines (`.clodex/*` +
+   `!.clodex/profile.json`) remain a legal remedy where a repo already has
+   them; do not migrate a working one.
+
+   **Second ignore mechanisms replace `.gitignore` — probe every one present.**
+   `.gcloudignore`, `.dockerignore`, `.vercelignore`, `.npmignore`: each makes
+   its uploader ignore *its* list instead of git's, so a repo whose git ignore
+   is perfect can still ship run state — sixteen worktrees of clodex logs and
+   evidence screenshots once entered a production Cloud Build upload exactly
+   this way. For each such file that exists:
+   ```bash
+   for f in .gcloudignore .dockerignore .vercelignore .npmignore; do
+     [ -f "$f" ] && { grep -qE '(^|/)\.clodex(/|$)|^\.clodex\b' "$f" \
+       || echo "$f does not exclude .clodex/ — run state will ride its uploads"; }
+   done
+   ```
+   A miss is handled the way this check handles `.gitignore`: show the exact
+   lines to add (`.clodex/` — plus `worktrees/` when lanes live under the
+   repo), and write them only after the user agrees.
 4. **Runtimes.** For each entry in the profile's `runtimes`: `command -v
    <command>`, plus the version check when `min_version` is set. Missing runtime
    → stop; it fails later and more expensively inside a stage. An empty list is
@@ -228,6 +254,21 @@ costs one `ls`.
    printenv "$NAME" >/dev/null || echo "missing credential: $NAME"
    ```
    Names only. Never print, echo, log, or write a credential value.
+7. **Bootstrap (worktree lanes only).** When this checkout is a linked
+   worktree — `git rev-parse --git-dir` differs from `git rev-parse
+   --git-common-dir` — first-run setup must already be **committed**, never
+   re-created here:
+   ```bash
+   git ls-files --error-unmatch .clodex/profile.json   # expect exit 0 (tracked)
+   ```
+   Tracked → record `{"name": "bootstrap", "status": "pass"}` among the
+   preflight checks. Not tracked → **stop; a lane never interviews.** Two
+   lanes once interviewed independently, six minutes apart, produced
+   contradictory profiles, and merge order silently picked the winner — every
+   later lane inherited answers nobody chose. The fix is the bootstrap ritual
+   (§3), run once from the main checkout on the default branch before lanes
+   fork; tell the user that, and wait. In the main checkout this check is a
+   no-op — §3 handles the first run there.
 
 ---
 
@@ -469,7 +510,9 @@ Non-destructive: never regenerate the file wholesale, never drop `notes`.
    another tool had in the index rides along inside a commit labelled as a
    profile write. With the pathspec, the commit can hold only that one file and
    the rest of the index is left exactly as it was. The `git add` is still
-   required — a pathspec cannot name a file git does not yet know about.
+   required — a pathspec cannot name a file git does not yet know about. When
+   §1 check 3 wrote the nested `.clodex/.gitignore`, name it in **both** lists
+   — it must be committed for worktrees to inherit it.
 
    This is the only commit this skill makes. Never `git add -A`, `git add .`, or
    `git commit -a`. Ever.
@@ -477,6 +520,21 @@ Non-destructive: never regenerate the file wholesale, never drop `notes`.
    reads it. Anything that must change what clodex *does* goes in a typed field.
 
 Field-by-field contract: `$CLODEX_HOME/profile.schema.json`.
+
+### Bootstrap — multi-lane repos: once, before lanes fork
+
+A repo that will run parallel lanes in worktrees gets its first-run setup as
+**one commit, on the default branch, from the main checkout, before any lane
+forks**: the interview above, the profile, and the nested `.clodex/.gitignore`
+(§1 check 3). The router never checks branches out — when the main checkout is
+not on the default branch, the commit is the user's to make there (or via
+`git -C <main-checkout>` once it is), and the bootstrap waits until it exists.
+A bootstrap that rides a feature branch rides **merge order**, which is the
+failure this ritual kills: two lanes once interviewed independently six
+minutes apart, produced contradictory profiles, and wall-clock picked the
+winner — a push-policy divergence between two lanes of the same weekend traced
+straight to it. Once the bootstrap commit exists, every lane's preflight
+**requires** it (§1 check 7) and no lane ever interviews.
 
 ---
 
