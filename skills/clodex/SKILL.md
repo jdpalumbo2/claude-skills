@@ -612,33 +612,41 @@ the orchestrator alone writes to it thereafter (§1 check 8).
 
 ## 4. Classify the ask
 
-| Shape | The ask looks like | v0.1 |
+| Shape | The ask looks like | Route |
 |---|---|---|
 | **feature** | new or changed behavior someone can observe — a capability, an enhancement, a behavior-changing bug fix | **core path** |
-| audit | "review / inventory / assess X across the repo", no change requested yet | lane not built |
+| **audit** | "review / inventory / assess X across the repo", no change requested yet | **core path** — open with `lane: "audit"`, hand to `clodex-audit` |
 | repair | recovering a broken state — failed deploy, environment drift, corrupted data | lane not built |
 | chore | mechanical, no product decision — dependency bumps, renames, formatting, test backfill, config sync | lane not built |
 | sync | making two places agree — docs↔code, env↔env, fork↔upstream, inventory↔reality | lane not built |
 
 **Feature-shaped** → continue to §5, open the run, hand to `clodex-plan`.
 
+**Audit-shaped** → the same path with a different lane: §5, open the run with
+`"lane": "audit"`, hand to `clodex-audit` (§6's table). The audit lane earned
+its build with usage evidence — two manual audits in one weekend, both
+excellent — and it is read-only by charter, so the change boundary it needs
+is the acknowledgment, not an owned-path plan.
+
 **Anything else** → the noticing rule. Say exactly three things and stop:
 
 1. Name the shape: "This is chore-shaped work — a mechanical change with no
    product decision in it."
-2. Say the lane is not built: "clodex v0.1 has no chore lane; audit, repair,
-   chore, and sync are deferred to v0.2."
+2. Say the lane is not built: "repair, chore, and sync are deferred; each
+   enters only with usage evidence, the way audit's did."
 3. Propose the closest manual approach, concretely — the actual commands, files,
    or sequence you would use, not a category.
 
-Then **do not open a run.** There is no stage skill to drive a non-feature lane,
+Then **do not open a run.** There is no stage skill to drive those lanes,
 and an open run nothing can advance is worse than none. If the user accepts the
 manual approach, do that work as ordinary work: no run directory, no manifest,
 no clodex events.
 
 Mixed asks ("audit the config, then fix it") classify by what the user wants
-*done*. If the fix is feature-shaped and specified, run the core path on the fix
-and handle the audit part manually.
+*done*. An audit-then-fix ask runs the audit lane first; its report's Routing
+section then feeds the fix into a feature run with the audit run as `parent`.
+A fix that is already fully specified skips straight to the core path, with
+the audit part folded into planning's grounding rather than run separately.
 
 ---
 
@@ -817,6 +825,7 @@ everything else from the run itself ("clodex-plan, run dir
 
 | Stage in `status` | Hand to |
 |---|---|
+| `open` with `lane: audit` | `clodex-audit` (its stage stays `open` for the whole run — that is its shape, not a stall) |
 | `open`, `plan` | `clodex-plan` |
 | `build` | `clodex-build` |
 | `verify` | `clodex-verify` |
@@ -856,4 +865,4 @@ exit report.
 | Inventing an event name | The vocabulary is frozen at 23 names and the reducer refuses anything else; the full list is the `e` enum in `$CLODEX_HOME/state/schemas/event.schema.json`. This skill appends only four of them: `run:opened`, `run:closed`, `release:updated`, `approval:granted`. Something the names do not cover is a **field** on one of them — see the telemetry block above. |
 | Reporting preflight only in chat | Chat is a transcript, and answering "was this environment verified?" from a transcript is the gap this field closes. It goes in `run:opened` (§6), or on the resumed session's first event (§1). |
 | Hand-editing `run.json` | It is derived. Append an event; `rebuild` regenerates it. |
-| Building an audit/repair/chore/sync lane on the fly | Name the shape, say it is v0.2, propose the manual approach (§4). |
+| Building a repair/chore/sync lane on the fly | Name the shape, say it is deferred, propose the manual approach (§4). Audit is built — route it, do not hand-roll it. |
