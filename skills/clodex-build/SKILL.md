@@ -570,6 +570,26 @@ Use the `if`, not `[ -n "$TEST_CMD" ] && …`. With `commands.test: null` the te
 itself is what fails, so the one-liner prints `gate rc=1` — a red gate in a repo
 that has no gate, sending you to fix a failure that does not exist.
 
+**If you pipe the gate — through `tail`, `tee`, anything — the rc you print
+must be `${PIPESTATUS[0]}` under `set -o pipefail`, never `$?`.** After a pipe,
+`$?` is the LAST command's exit: a gate that died on ENOENT has printed
+`gate rc=0` twice in one day because `$?` was `tail`'s. The unpiped form above
+needs nothing; the moment a pipe appears, so does `PIPESTATUS`.
+
+**A bare rc is not evidence — a gate result carries a pass count.** Quote the
+runner's own summary line (`142 passed`, `559 / 87 skipped`) beside the rc.
+The count is what makes a green gate comparable to its baseline and a silently
+shrunk suite visible; `rc=0` alone says only that *something* exited cleanly.
+
+**A batch containing a rebase or merge resolution owes a test-inventory
+diff.** A conflict resolution can delete a test silently, and every
+count-based gate stays green, because a baseline that moves during a rebase is
+no baseline — it happened, and the deleted regression test was found only by
+an adversarial review. List test NAMES before and after (the runner's
+`--list-tests` / `--collect-only`, or grepping the test declarations), diff
+them, and carry the diff into §9's verdict as its own item: a missing name is
+a finding, not a smaller number.
+
 - **rc 0** → green. Continue to §9.
 - **non-zero** → red. The delta does not leave this stage. Fix it — yourself, or
   by running the implementer again with the failure output in the prompt — and

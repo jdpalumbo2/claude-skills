@@ -233,6 +233,14 @@ failure that does not exist.
   **finding**, not debt (§9 draws that line: debt is evidence deferred, a red
   gate is evidence produced and negative). Do not fix it here — §8.
 
+Two rules the printed block obeys. **Each rc must be the gate's own**: the
+redirect form above is safe, but the moment a gate is piped (`| tail`,
+`| tee`) the rc printed must be `${PIPESTATUS[0]}` under `set -o pipefail` —
+`$?` after a pipe belongs to the last command, and it has printed `rc=0` for
+an npm run that died on ENOENT. And **each green gate's line carries the
+suite's own pass count**, quoted from its log (`142 passed`, `57/0/1`): a
+bare rc is not evidence, and §5's `result` field demands the count anyway.
+
 Keep the printed block. §5 quotes it into the `tests` evidence item, and §11
 repeats it to ship.
 
@@ -279,6 +287,11 @@ satisfied by a green suite that never touches the parser; that gap is a finding
 proof names something beyond the profile's test command — an integration suite,
 a specific target — run that too and append a second `tests` item for it, keyed
 by its own `how`.
+
+When the run's history contains a rebase or merge resolution, the `tests`
+evidence must also include the **test-inventory diff** build §8 produced (or
+produce one now: test names pre vs post, diffed). Counts survive a silently
+deleted test; the name list does not.
 
 Debt when: the profile's `commands.test` is null and no suite exists to run, or
 the suite cannot run in this environment (a missing toolchain the router's
