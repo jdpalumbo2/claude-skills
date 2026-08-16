@@ -136,7 +136,11 @@ Then, in this order:
    grounded in them before it proposes structure.
 2. **Read the files the brief names**, and the tests that cover them.
 3. **Find the pattern this repo already uses** for the thing you are about to
-   add. Reinventing one is a finding the reviewer will hand back.
+   add. Reinventing one is a finding the reviewer will hand back. What you find
+   — or where you looked and found nothing — becomes the plan's `## Prior art`
+   section (§5). This duty used to live only in prose, and prose duty fails
+   under load; a required section in a hashed file, interrogated at review
+   (§8), does not.
 
 `plans_dir` unset or `null` → use the conventional default `docs/plans/`, tell
 the user once — *"this repo's profile has no `docs.plans_dir`; I am using
@@ -168,7 +172,9 @@ A question qualifies only if it is one of these:
   boundary, cost, an external side effect, or a data/privacy boundary.
 
 Everything else you **resolve by reading** and write down as an assumption in the
-plan. Assumptions are stated, not asked.
+plan. Assumptions are stated, not asked. Prior art is always in that category:
+which mechanism this repo already uses for an isomorphic problem is answered by
+reading the repo (§5's `## Prior art`), never by asking the user.
 
 Ask the whole list in **one message**. Before sending it, delete every question
 you could answer by opening a file — that is the entire test. If the list is
@@ -208,8 +214,10 @@ CI, tests, schema, or an internal API.
 **The tie-break, and it overrides Test B:** if the plan makes no new visual, copy,
 or positioning decision — it reuses an existing component, existing copy,
 existing layout — the answer is **no**, and the plan must name the existing
-pattern it follows. Adding a button built from the design system to an existing
-page is not a taste decision. Designing what that page looks like is.
+pattern it follows — the same mechanism its `## Prior art` section (§5) cites;
+name one pattern, in both places, so the two cannot drift. Adding a button built
+from the design system to an existing page is not a taste decision. Designing
+what that page looks like is.
 
 Write the answer into the plan as a required line (§5). It is auditable: a
 reader can check it against the ask and the owned paths.
@@ -224,9 +232,11 @@ reader can check it against the ask and the owned paths.
 ## 5. Write the plan
 
 **Every plan declares, without exception:** the brief verbatim · what in the repo
-it is grounded in · its assumptions · its direction-gate answer · one *Done when*
-· what is in and out of scope · its batches, each with owned paths and its own
-*Done when* · its evidence classes · its risks.
+it is grounded in · its prior art — the existing mechanism here that solves an
+isomorphic problem, and why it is or is not the shape used · its assumptions ·
+its direction-gate answer · one *Done when* · what is in and out of scope · its
+batches, each with owned paths and its own *Done when* · its evidence classes ·
+its risks.
 
 File: `<plans_dir>/<YYYY-MM-DD>-<slug>.md`, slug kebab-cased from the brief. If
 `plans_dir` already holds files, match their naming convention instead.
@@ -245,6 +255,12 @@ Run: <run-id> · Plan version: <N> · Repo: <repo root>
 ## Grounding
 What in this repo this builds on: the files read, the existing pattern followed,
 the architecture docs consulted. Name paths.
+
+## Prior art
+The existing mechanism in this repo that solves an isomorphic problem, cited by
+path, and why it is or is not the shape used here. "None exists" is legal only
+after naming where you looked. When the direction gate's tie-break (§4) answered
+`no` because this follows an existing pattern, cite the same mechanism here.
 
 ## Assumptions
 One line each, falsifiable, resolved by reading — not by asking.
