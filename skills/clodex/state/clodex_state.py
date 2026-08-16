@@ -624,8 +624,47 @@ def load_snapshot(run_dir):
 # CLI
 # --------------------------------------------------------------------------- #
 
+def _check_run_dir_identity(run_dir):
+    """Refuse an append that would fork run state. Returns an error string or None.
+
+    Two guards, both born of one field incident (an append with a relative
+    RUN_DIR from the wrong cwd created a parallel empty run directory):
+
+    * the run dir must already exist — creation belongs solely to the router's
+      open step, so a path that resolves to nothing is a wrong path, never a
+      request to create one;
+    * once the log records `run:opened`, the dir must BE that run's directory:
+      its resolved path must equal `<recorded repo>/.clodex/<recorded run id>`.
+      A copied or wrongly-resolved run dir refuses instead of silently
+      diverging from the log it was cloned from.
+    """
+    if not os.path.isdir(run_dir):
+        return (
+            "run dir does not exist: %s — append never creates one; "
+            "the router's open step owns mkdir" % run_dir
+        )
+    snap = rebuild(run_dir)
+    repo, run_id = snap.get("repo"), snap.get("run")
+    if repo and run_id:
+        expected = os.path.join(repo, ".clodex", run_id)
+        if os.path.realpath(run_dir) != os.path.realpath(expected):
+            return (
+                "run dir %s is not this run's directory: run:opened records %s "
+                "— refusing to fork run state; append from the recorded location"
+                % (run_dir, expected)
+            )
+    return None
+
+
 def _cmd_append(args):
-    raw = sys.stdin.read()
+    problem = _check_run_dir_identity(args.run_dir)
+    if problem is not None:
+        print("clodex-state: %s" % problem, file=sys.stderr)
+        return EXIT_USAGE
+
+    raw = getattr(args, "event", None)
+    if raw is None:
+        raw = sys.stdin.read()
     try:
         event = json.loads(raw)
     except ValueError as exc:
