@@ -66,5 +66,35 @@ class AppendNeverCreatesARunDir(ClodexCheck):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class InlineEventPayload(ClodexCheck):
+    """2.3 — `append -e '<json>'`: single events stop needing the
+    heredoc-to-temp-file ceremony. stdin remains the default."""
+
+    def test_exploit_inline_payload_is_accepted(self):
+        import json as _json
+        from clodex_harness import run_state
+
+        run_dir = self.make_run()
+        result = run_state(
+            ["append", str(run_dir), "-e",
+             _json.dumps({"e": "stage:plan:entered"})],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.rebuild(run_dir)["stage"], "plan")
+
+    def test_exploit_inline_payload_error_names_its_source(self):
+        from clodex_harness import run_state
+
+        run_dir = self.make_run()
+        result = run_state(["append", str(run_dir), "-e", "not json"])
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("-e payload", result.stderr)
+
+    def test_control_stdin_remains_the_default(self):
+        run_dir = self.make_run()
+        result = self.append(run_dir, {"e": "stage:plan:entered"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

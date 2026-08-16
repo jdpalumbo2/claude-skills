@@ -50,9 +50,10 @@ Library use:
     snap = rebuild(run_dir)          # pure reduction; rebuild(d) == rebuild(d)
     snap = load_snapshot(run_dir)    # validates, else rebuilds
 
-CLI use (payloads travel by stdin, never argv):
+CLI use (payloads travel by stdin by default; `-e` takes one inline event):
 
     echo '{"e": "run:opened"}' | python3 clodex_state.py append <run_dir>
+    python3 clodex_state.py append <run_dir> -e '{"e": "stage:plan:entered"}'
     python3 clodex_state.py rebuild <run_dir>
     python3 clodex_state.py status  <run_dir>
     python3 clodex_state.py unlock  <run_dir>
@@ -662,15 +663,15 @@ def _cmd_append(args):
         print("clodex-state: %s" % problem, file=sys.stderr)
         return EXIT_USAGE
 
-    raw = getattr(args, "event", None)
-    if raw is None:
-        raw = sys.stdin.read()
+    inline = getattr(args, "event", None)
+    raw = inline if inline is not None else sys.stdin.read()
+    source = "-e payload" if inline is not None else "stdin"
     try:
         event = json.loads(raw)
     except ValueError as exc:
-        raise ClodexStateError("stdin is not a valid JSON event: %s" % exc)
+        raise ClodexStateError("%s is not a valid JSON event: %s" % (source, exc))
     if not isinstance(event, dict):
-        raise ClodexStateError("stdin must hold one JSON object")
+        raise ClodexStateError("%s must hold one JSON object" % source)
 
     # One writer for the pair, so no other writer lands between the event and
     # the snapshot that describes it. append_event does its own vetting.
@@ -825,6 +826,13 @@ def main(argv=None):
     ):
         sub = subcommands.add_parser(name, help=help_text)
         sub.add_argument("run_dir", help="the run's directory")
+        if name == "append":
+            sub.add_argument(
+                "-e", "--event", metavar="JSON",
+                help="the event as an inline JSON argument instead of stdin — "
+                     "for single events that would otherwise need a temp file; "
+                     "payloads containing quotes are still safer as files",
+            )
         if name == "unlock":
             sub.add_argument(
                 "--force", action="store_true",
