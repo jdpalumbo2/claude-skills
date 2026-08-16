@@ -1033,6 +1033,9 @@ if not (src or cl):
             problems.append("%s: this repo has no changelog and no version source, so there is "
                             "nothing to write and nothing for a release commit to contain (§4)"
                             % x["id"])
+elif "bookkeeping" in cut:
+    pass  # dropped in writing, reason checked above — §7.1 never runs, so
+          # there is no descriptor to validate and demanding one is spurious
 elif len(book) != 1:
     problems.append("expected exactly one bookkeeping descriptor, found %d" % len(book))
 else:
