@@ -825,6 +825,28 @@ everything else from the run itself ("clodex-plan, run dir
 The router does **not** append `stage:*:entered`. Each stage skill appends its
 own entry event, so the log never claims a stage that did not start.
 
+### Orchestrated lanes: the brief and report templates
+
+`$CLODEX_HOME/templates/` carries the codified brief-and-report contract —
+the part of a multi-lane weekend that demonstrably carried output quality
+(the bare control lane matched the clodex lanes because its brief was equally
+good; brief anatomy is the quality engine, and these files make it
+reproducible):
+
+- **`lane-brief.md`** — the 16-part anatomy. Use it when *writing* briefs for
+  lanes, and hold an incoming brief against it when you receive one. Its two
+  standing rules bind either way: the orchestration plan is committed before
+  lanes fork, and every lane's report opens with its run id — or "bare" and
+  why.
+- **`lane-report.md`** — the report shape a merge gate consumes verbatim.
+  A brief's `REPORT BACK:` line should demand exactly its sections.
+- **`handoff.md`** — the report's sibling for `release_owner: "external"`
+  runs: what equips the external owner to release (`clodex-ship` §7A).
+
+When the ask you are classifying (§4) *is* a lane brief from an orchestrator,
+say so, run the core path, and let the brief's REPORT BACK contract shape the
+exit report.
+
 ---
 
 ## Common mistakes
