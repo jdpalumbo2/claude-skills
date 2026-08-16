@@ -389,6 +389,7 @@ files directly:
 CONTRACT="$RUN_DIR/batch-1.contract.md"
 PROMPT="$RUN_DIR/batch-1.prompt.md"
 OUT="$(bash "$RUNNER" --role implementer --repo "$REPO" \
+        --run-id "$(basename "$RUN_DIR")" \
         --prompt-file "$PROMPT" --input "$CONTRACT" --input "$PLAN")"; RC=$?
 printf 'rc=%s line=%s\n' "$RC" "$OUT"
 ENVELOPE="${OUT#* }"     # strip the FIRST word only — a repo path may contain spaces
@@ -642,6 +643,7 @@ event's note. Everything else gets the reviewer:
 ```bash
 REVIEW_PROMPT="$RUN_DIR/batch-<N>.review.prompt.md"     # written with your file tool
 OUT="$(bash "$RUNNER" --role code-reviewer --repo "$REPO" \
+        --run-id "$(basename "$RUN_DIR")" \
         --prompt-file "$REVIEW_PROMPT" --input "$RUN_DIR/batch-<N>.diff" --input "$PLAN")"; RC=$?
 ENVELOPE="${OUT#* }"
 ```
@@ -938,7 +940,9 @@ plan_path = snap["plan"]["path"]
 want = (hashlib.sha256(open(plan_path, "rb").read()).hexdigest()
         if plan_path and os.path.exists(plan_path) else None)
 ran = set()
-for path in sorted(glob.glob(os.path.join(runner_state, "*", "*.envelope.json"))):
+# Both layouts: <role>/ (no run id) and <run-id>/<role>/ (runner --run-id).
+for path in sorted(glob.glob(os.path.join(runner_state, "*", "*.envelope.json"))
+                   + glob.glob(os.path.join(runner_state, "*", "*", "*.envelope.json"))):
     env = json.load(open(path))
     if env["status"] == "complete" and any(i["sha256"] == want for i in env["inputs"]):
         ran.add(env["role"])

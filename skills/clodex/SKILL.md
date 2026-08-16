@@ -85,7 +85,7 @@ a run that never sets them reduces exactly as it would have without them.
   ```json
   {"codex": {"invocation_id": "plan-reviewer-20260811T134400Z-88b056",
              "role": "plan-reviewer", "round": 4, "status": "complete",
-             "envelope": ".clodex/runner/plan-reviewer/<id>.envelope.json",
+             "envelope": ".clodex/runner/<run-id>/plan-reviewer/<id>.envelope.json",
              "input_hashes": ["<sha256 of each artifact it read>"],
              "duration_s": 501, "resumed": false}}
   ```
@@ -130,6 +130,29 @@ and `detail` copied verbatim from the envelope's finding, so the manifest can
 answer *where* and *why* without anyone opening envelopes — and
 `finding:disposed`'s `note` is promoted into the snapshot beside them. See
 `clodex-plan` §9.
+
+### Long rounds: `--detach`, and how to watch one
+
+A review or implementer round can outlive a harness tool timeout. Do not
+babysit it in the foreground and do not hand-roll nohup — the runner does it:
+
+```bash
+bash "$RUNNER" --role implementer --repo "$REPO" \
+     --run-id "$(basename "$RUN_DIR")" --prompt-file "$PROMPT" --detach
+# -> detached <invocation-id> pid <pid> log <runner log path>
+```
+
+Watch **both** signals, because either alone lies: the pid (gone means the
+run ended, says nothing about how) and the runner log's final status line —
+`grep -E '^(complete|partial|interrupted|failed) ' <log>` — which also names
+the envelope. Heartbeats stream into the same log, so a stalled run and a
+slow one are distinguishable mid-flight. When the pid is gone, map the status
+the way the stage skills' rc tables do. `--resume <invocation-id>` works
+alone: the runner recorded the prompt path in the invocation's meta.
+
+Stage skills always pass `--run-id "$(basename "$RUN_DIR")"`. It keys the
+runner state by run (`.clodex/runner/<run-id>/<role>/…`), so two runs in one
+repo never interleave their envelopes.
 
 ---
 

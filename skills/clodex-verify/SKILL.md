@@ -404,6 +404,7 @@ if [ -z "$PLAN" ]; then
     echo "and ask it to close or abandon the run (§1, last row of the resume map)."
 else
     OUT="$(bash "$RUNNER" --role code-reviewer --repo "$REPO" \
+            --run-id "$(basename "$RUN_DIR")" \
             --prompt-file "$PROMPT" --input "$RUN_DIR/verify.diff" --input "$PLAN")"; RC=$?
     printf 'rc=%s line=%s\n' "$RC" "$OUT"
     ENVELOPE="${OUT#* }"   # strip the FIRST word only — a repo path may contain spaces

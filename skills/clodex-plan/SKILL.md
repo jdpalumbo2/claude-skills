@@ -470,6 +470,7 @@ Run it:
 ```bash
 PROMPT="$RUN_DIR/plan-review-r1.prompt.md"     # r2, r3 on later rounds
 OUT="$(bash "$RUNNER" --role plan-reviewer --repo "$REPO" \
+        --run-id "$(basename "$RUN_DIR")" \
         --prompt-file "$PROMPT" --input "$PLAN")"; RC=$?
 printf 'rc=%s line=%s\n' "$RC" "$OUT"
 ENVELOPE="${OUT#* }"     # strip the FIRST word only — a repo path may contain spaces

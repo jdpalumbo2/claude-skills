@@ -235,7 +235,9 @@ if not live:
 # complete one, in that role, whose inputs hash the CURRENT plan file.
 ran = set()
 if disk is not None:
-    for path in sorted(glob.glob(os.path.join(runner_state, "*", "*.envelope.json"))):
+    # Both layouts: <role>/ (no run id) and <run-id>/<role>/ (runner --run-id).
+    for path in sorted(glob.glob(os.path.join(runner_state, "*", "*.envelope.json"))
+                       + glob.glob(os.path.join(runner_state, "*", "*", "*.envelope.json"))):
         try:                       # a half-written envelope is an absent review,
             env = json.load(open(path))     # not a reason to crash the gate
         except (OSError, ValueError):
@@ -354,6 +356,7 @@ git diff --name-only "$START" HEAD                 # read this before deciding t
 PROMPT="$RUN_DIR/release-review.prompt.md"         # written with your file tool, never a shell string
 RC=0
 OUT="$(bash "$RUNNER" --role code-reviewer --repo "$REPO" \
+        --run-id "$(basename "$RUN_DIR")" \
         --prompt-file "$PROMPT" --input "$RUN_DIR/release.diff" --input "$PLAN")" || RC=$?
 printf 'rc=%s line=%s\n' "$RC" "$OUT"
 ENVELOPE="${OUT#* }"      # strip the FIRST word only — a repo path may contain spaces

@@ -422,10 +422,11 @@ case_f() {
 }
 
 # ---------------------------------------------------------------------------
-# (g) a long run heartbeats to stderr, and the ticker dies with the run
+# (g) a long run heartbeats to its runner LOG — never stdout or stderr — and
+#     the ticker dies with the run
 # ---------------------------------------------------------------------------
 case_g() {
-    local name="g  long run heartbeats to stderr and leaves no ticker behind"
+    local name="g  long run heartbeats to the runner log only; ticker dies with the run"
     local log="$TMP/log/g" state="$TMP/state/g" prompt="$TMP/prompt-g.md"
     printf 'Review the plan.\n' > "$prompt"
 
@@ -439,25 +440,37 @@ case_g() {
         fail "$name" "runner exited $rc; stderr: $(tail -3 "$TMP/g.err" | tr '\n' ' ')"
         return
     fi
-    local ticks
-    ticks="$(grep -c 'still running' "$TMP/g.err" || true)"
-    if [ "$ticks" -lt 2 ]; then
-        fail "$name" "expected repeated heartbeats on stderr, saw $ticks"
+    local runner_log
+    runner_log="$(ls "$state"/*/*.runner.log 2>/dev/null | head -1 || true)"
+    if [ -z "$runner_log" ]; then
+        fail "$name" "no runner log was written under $state"
         return
     fi
-    if ! grep -q 'last event:' "$TMP/g.err"; then
+    local ticks
+    ticks="$(grep -c 'still running' "$runner_log" || true)"
+    if [ "$ticks" -lt 2 ]; then
+        fail "$name" "expected repeated heartbeats in the runner log, saw $ticks"
+        return
+    fi
+    if ! grep -q 'last event:' "$runner_log"; then
         fail "$name" "heartbeat does not report the last observed event"
         return
     fi
+    # A consumer that went away must have nothing to be killed by: heartbeats
+    # reach neither stdout nor stderr.
+    if grep -q 'still running' "$TMP/g.out" "$TMP/g.err" 2>/dev/null; then
+        fail "$name" "heartbeats leaked to stdout/stderr"
+        return
+    fi
     if [ "$(wc -l < "$TMP/g.out" | tr -d ' ')" != "1" ]; then
-        fail "$name" "heartbeat polluted stdout: $(tr '\n' ' ' < "$TMP/g.out")"
+        fail "$name" "stdout is not exactly the status line: $(tr '\n' ' ' < "$TMP/g.out")"
         return
     fi
     # A ticker that outlived the run would keep writing after the runner exited.
     local before after
-    before="$(wc -l < "$TMP/g.err" | tr -d ' ')"
+    before="$(wc -l < "$runner_log" | tr -d ' ')"
     sleep 2
-    after="$(wc -l < "$TMP/g.err" | tr -d ' ')"
+    after="$(wc -l < "$runner_log" | tr -d ' ')"
     if [ "$before" != "$after" ]; then
         fail "$name" "the heartbeat ticker outlived the run ($before -> $after lines)"
         return
@@ -659,6 +672,178 @@ case_m() {
     pass "$name"
 }
 
+# ---------------------------------------------------------------------------
+# (n) a death mode with no straight-line exit still writes an envelope —
+#     SIGHUP is how a detached consumer's death reaches the runner
+# ---------------------------------------------------------------------------
+case_n() {
+    local name="n  SIGHUP mid-run => interrupted envelope written, resume line in the log"
+    local log="$TMP/log/n" state="$TMP/state/n" prompt="$TMP/prompt-n.md"
+    printf 'Implement the batch.\n' > "$prompt"
+
+    STUB_LOG_DIR="$log" CLODEX_RUNNER_STATE_DIR="$state" \
+    STUB_MODE=hang STUB_HANG_SECONDS=10 \
+        "$RUNNER" --role implementer --repo "$REPO" --prompt-file "$prompt" \
+        > "$TMP/n.out" 2> "$TMP/n.err" &
+    local runner_pid=$!
+
+    local i started=""
+    for i in $(seq 1 100); do
+        local f
+        for f in "$state"/*/*.events.ndjson; do
+            [ -f "$f" ] || continue
+            if grep -q 'thread.started' "$f" 2>/dev/null; then started="$f"; break; fi
+        done
+        [ -z "$started" ] || break
+        sleep 0.1
+    done
+    if [ -z "$started" ]; then
+        kill -KILL "$runner_pid" 2>/dev/null || true
+        wait "$runner_pid" 2>/dev/null || true
+        fail "$name" "codex never started"
+        return
+    fi
+
+    kill -HUP "$runner_pid" 2>/dev/null || true
+    local rc=0
+    wait "$runner_pid" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        fail "$name" "runner exited 0 after SIGHUP"
+        return
+    fi
+    local env
+    env="$(sole_envelope "$state")" || { fail "$name" "SIGHUP lost the envelope"; return; }
+    local status
+    status="$(json_get "$env" status)"
+    if [ "$status" != "interrupted" ]; then
+        fail "$name" "envelope status is '$status', expected 'interrupted'"
+        return
+    fi
+    pass "$name"
+}
+
+# ---------------------------------------------------------------------------
+# (o) --detach: immediate return with pid + log, status line lands in the log
+# ---------------------------------------------------------------------------
+case_o() {
+    local name="o  --detach prints pid+log and the log ends with the status line"
+    local log="$TMP/log/o" state="$TMP/state/o" prompt="$TMP/prompt-o.md"
+    printf 'Review the plan.\n' > "$prompt"
+
+    local rc=0 out
+    out="$(STUB_LOG_DIR="$log" CLODEX_RUNNER_STATE_DIR="$state" \
+           STUB_MODE=slow STUB_SLOW_SECONDS=2 \
+           "$RUNNER" --role advisor --repo "$REPO" --prompt-file "$prompt" --detach \
+           2> "$TMP/o.err")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail "$name" "--detach exited $rc; stderr: $(tail -3 "$TMP/o.err" | tr '\n' ' ')"
+        return
+    fi
+    local pid runner_log
+    case "$out" in
+        detached\ *\ pid\ *\ log\ *) ;;
+        *) fail "$name" "unexpected detach line: $out"; return ;;
+    esac
+    pid="$(printf '%s' "$out" | awk '{print $4}')"
+    runner_log="$(printf '%s' "$out" | awk '{print $6}')"
+
+    # The Monitor recipe from the skills: watch the pid AND grep the log for a
+    # final status line.
+    local i
+    for i in $(seq 1 100); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        fail "$name" "detached invocation still running after 10s"
+        return
+    fi
+    if ! grep -Eq '^(complete|partial|interrupted|failed) ' "$runner_log"; then
+        fail "$name" "no status line in the runner log: $(tail -3 "$runner_log" | tr '\n' ' ')"
+        return
+    fi
+    local env
+    env="$(sole_envelope "$state")" || { fail "$name" "detached run wrote no envelope"; return; }
+    if [ "$(json_get "$env" status)" != "complete" ]; then
+        fail "$name" "detached envelope is '$(json_get "$env" status)', expected complete"
+        return
+    fi
+    pass "$name"
+}
+
+# ---------------------------------------------------------------------------
+# (p) --run-id keys the state dir, so two runs never interleave envelopes
+# ---------------------------------------------------------------------------
+case_p() {
+    local name="p  --run-id keys envelope paths by run"
+    local log="$TMP/log/p" state="$TMP/state/p" prompt="$TMP/prompt-p.md"
+    printf 'Review the plan.\n' > "$prompt"
+
+    local rc=0
+    STUB_LOG_DIR="$log" CLODEX_RUNNER_STATE_DIR="$state" STUB_MODE=complete \
+        "$RUNNER" --role advisor --repo "$REPO" --prompt-file "$prompt" \
+        --run-id r-2026-08-16-a \
+        > "$TMP/p.out" 2> "$TMP/p.err" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail "$name" "runner exited $rc; stderr: $(tail -3 "$TMP/p.err" | tr '\n' ' ')"
+        return
+    fi
+    local env
+    env="$(sole_envelope "$state/r-2026-08-16-a")" || {
+        fail "$name" "no envelope under $state/r-2026-08-16-a"; return; }
+    case "$env" in
+        "$state/r-2026-08-16-a/advisor/"*) ;;
+        *) fail "$name" "envelope landed at $env, expected under r-2026-08-16-a/advisor"; return ;;
+    esac
+    # And the printed resume command carries the run id, or a resume would
+    # look in the wrong state dir.
+    if ! grep -q 'r-2026-08-16-a' "$TMP/p.out"; then
+        # complete runs print no resume line; check the envelope's state_dir
+        if [ "$(json_get "$env" output.state_dir)" != "$state/r-2026-08-16-a/advisor" ]; then
+            fail "$name" "state_dir not keyed by run id: $(json_get "$env" output.state_dir)"
+            return
+        fi
+    fi
+    pass "$name"
+}
+
+# ---------------------------------------------------------------------------
+# (q) --resume <id> works alone: the prompt path is read back from the meta
+# ---------------------------------------------------------------------------
+case_q() {
+    local name="q  bare --resume works without --prompt-file"
+    local state="$TMP/state/q" prompt="$TMP/prompt-q.md"
+    local log_one="$TMP/log/q-1" log_two="$TMP/log/q-2"
+    printf 'Review the plan.\n' > "$prompt"
+
+    local rc=0
+    STUB_LOG_DIR="$log_one" CLODEX_RUNNER_STATE_DIR="$state" STUB_MODE=partial \
+        "$RUNNER" --role plan-reviewer --repo "$REPO" --prompt-file "$prompt" \
+        > "$TMP/q1.out" 2> "$TMP/q1.err" || rc=$?
+    if [ "$rc" -ne 2 ]; then
+        fail "$name" "first turn exited $rc, expected 2 (partial)"
+        return
+    fi
+    local env id
+    env="$(sole_envelope "$state")" || { fail "$name" "no envelope from the first turn"; return; }
+    id="$(json_get "$env" invocation_id)"
+
+    rc=0
+    STUB_LOG_DIR="$log_two" CLODEX_RUNNER_STATE_DIR="$state" STUB_MODE=complete \
+        "$RUNNER" --role plan-reviewer --repo "$REPO" --resume "$id" \
+        > "$TMP/q2.out" 2> "$TMP/q2.err" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail "$name" "bare resume exited $rc; stderr: $(tail -3 "$TMP/q2.err" | tr '\n' ' ')"
+        return
+    fi
+    # The prompt really reached codex again, from the recorded path.
+    if ! grep -q 'Review the plan.' "$log_two/stdin"; then
+        fail "$name" "resume did not feed the recorded prompt to codex"
+        return
+    fi
+    pass "$name"
+}
+
 case_a
 case_b
 case_c
@@ -672,6 +857,10 @@ case_j
 case_k
 case_l
 case_m
+case_n
+case_o
+case_p
+case_q
 
 printf '\n'
 if [ "$FAILURES" -ne 0 ]; then
