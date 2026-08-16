@@ -202,6 +202,18 @@ actions · live-data mutation and new security/privacy boundaries · accepting
 non-empty verification debt at ship · external publication and client-facing
 sends · overriding unresolved review findings.
 
+*(Amended 2026-08-16, v0.2 — the typed-mandate carve-out.)* A delegated run
+may carry a **typed mandate** (`approval:granted`, `scope: "mandate"`,
+plan-hash-bound; `clodex-plan` §6): the user pre-grants, once and in writing,
+exactly these gate classes — finding dispositions (accept/reject with
+grounds) and plan/direction approval. The mandate is the user exercising
+those decisions in advance, not the system taking them; every consumption
+records `by: "mandate"` so the manifest shows which kind of run it was, and
+every plan amendment revokes it. **Explicitly outside any mandate, forever:
+verification-debt acceptance and release authorization.** Those two stay
+human at the gate in every run — they are the list above's core, and the
+carve-out does not touch them.
+
 ## Deferred to v0.2 (deliberately)
 
 Audit, repair, chore, and sync lanes (router notices and hands off manually

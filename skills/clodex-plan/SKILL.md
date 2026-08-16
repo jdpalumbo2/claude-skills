@@ -383,6 +383,46 @@ An amendment revokes every approval bound to the superseded hash. Inside this
 stage, before approval, that revokes nothing — which is exactly why revising
 during the review loop is cheap and revising after approval is not.
 
+### The typed mandate — pre-granted gates for a delegated run
+
+A lane run under an orchestrator's standing brief satisfies some gates on
+that brief's authority. Untyped, that authority lived in free text — and two
+lanes of the same weekend answered the same gate class differently: one
+satisfied plan approval on the brief, the other raised a blocking modal, same
+skill, same repo. Typed, it is one event, recorded immediately after
+`plan:recorded` when the brief (or the user, asked once) pre-grants gate
+classes:
+
+```json
+{"e": "approval:granted", "scope": "mandate", "by": "user",
+ "plan_version": 1, "plan_hash": "<current plan hash>",
+ "actions": [{"grants": "finding-disposition"},
+             {"grants": "plan-approval"},
+             {"grants": "direction-approval"}]}
+```
+
+`actions[].grants` draws on a vocabulary of exactly three:
+`finding-disposition` (accept or reject a finding, with grounds),
+`plan-approval`, and `direction-approval`. **Verification-debt acceptance and
+release authorization cannot be granted** — those gates open their modal in
+every run, mandate or not; they are the human-owned core the design reserves,
+and a mandate claiming them is ignored where those gates read it.
+
+**Consult it before every modal it could cover.** A standing (un-revoked)
+mandate whose grants cover the gate: satisfy the gate on its authority, set
+`by: "mandate"` on the event so the manifest says which kind of run this was,
+and let the disposition `note` cite the mandate instead of quoting a user who
+was never asked — `"under mandate (grants finding-disposition): <the
+grounds>"`. No standing mandate, or a gate outside its grants → the modal
+opens as ever.
+
+The mandate binds to the plan hash like every approval, so **every amendment
+revokes it**. Accepted v0.2 behavior, not an accident: re-grant it against
+the new hash on the authority that granted it first — one append, and the
+log shows the re-grant. A mandate you cannot honestly re-grant after an
+amendment is a mandate the amendment invalidated, which is the system
+working.
+
 ---
 
 ## 7. The direction checkpoint — only when the gate is yes
@@ -392,7 +432,10 @@ Present it **after** the plan is recorded (the approval must bind to a hash) and
 
 One message: the premise, the comps, the acceptance criteria, and the explicit
 ask — *approve this direction, or tell me what to change.* Do not start the
-review loop until they answer.
+review loop until they answer. A standing mandate granting
+`direction-approval` (§6) answers this gate itself: present the same content
+as a record rather than a question, and append the direction approval with
+`by: "mandate"`.
 
 **Approved** → append:
 
@@ -619,8 +662,8 @@ dispositions — nothing is dropped, and "we talked about it" is not a state:
 | Disposition | Means | Who decides |
 |---|---|---|
 | `fixed` | the plan was changed to address it — so this implies an amendment (§6) and a new hash, and §6's materiality test decides whether the review loop re-opens | you |
-| `accepted` | legitimate, and the user chose not to act on it. It stands as a known risk and **survives into ship** | the user, explicitly |
-| `rejected` | wrong — the reviewer misread the repo or the ask | the user, explicitly |
+| `accepted` | legitimate, and the user chose not to act on it. It stands as a known risk and **survives into ship** | the user, explicitly — or a standing mandate granting `finding-disposition` (§6) |
+| `rejected` | wrong — the reviewer misread the repo or the ask | the user, explicitly — or a standing mandate granting `finding-disposition` (§6) |
 | `deferred-to-build` | true, but implementation detail rather than a plan defect — the plan is right; the finding is about how the owning batch should build it | you |
 
 ```json
@@ -630,7 +673,10 @@ dispositions — nothing is dropped, and "we talked about it" is not a state:
 
 `accepted` and `rejected` are overrides of an independent review, which is a
 human-owned decision. Propose them — do not append them until the user has said
-so, and quote their words in `note`. `fixed` is your own work and needs no
+so, and quote their words in `note`. The one exception is a standing mandate
+granting `finding-disposition` (§6): then the disposition is appended on its
+authority, and the `note` cites the mandate plus the grounds instead of
+quoting a user who was never asked. `fixed` is your own work and needs no
 approval.
 
 `deferred-to-build` is yours the way `fixed` is, but it is narrow: the finding
@@ -701,6 +747,11 @@ across the appends this section is about to make (`finding:disposed`,
 `verification:declared`, `plan:approved` — one block per event): a review
 round whose record is missing here is a round the run never provably spent.
 `duration_s` and `status` in those blocks are the envelope's, never yours.
+
+**Under a mandate granting `plan-approval`** (§6) the message below is
+written to chat as a record rather than a question, and the appends carry
+`by: "mandate"` — including any dispositions its `finding-disposition` grant
+covers. A gate class the mandate does not grant still opens its modal.
 
 **The approval message** — one message, and for most runs the only gate this
 stage spends:

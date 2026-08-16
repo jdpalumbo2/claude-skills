@@ -538,11 +538,13 @@ one you found yourself, such as a red gate. A finding you found yourself has no
 invocation and carries neither field; a delegated one carries both, with the
 `codex` block on the first finding of that invocation (`clodex` → Telemetry).
 
-What carries over unchanged from `clodex-plan` §9: the three dispositions
-(`fixed`, `accepted`, `rejected`), that **only the user** may accept or reject
-one and their words go in the `note`, that nothing is ever dropped, and that
-severity does not restrict disposition — an `accepted` blocker is a legitimate
-end state that survives into ship's final review.
+What carries over unchanged from `clodex-plan` §9: the dispositions that
+apply here (`fixed`, `accepted`, `rejected`), that **only the user** may
+accept or reject one and their words go in the `note` — or a standing mandate
+granting `finding-disposition` (`clodex-plan` §6), with `by: "mandate"` and
+the note citing it — that nothing is ever dropped, and that severity does not
+restrict disposition: an `accepted` blocker is a legitimate end state that
+survives into ship's final review.
 
 ```json
 {"e": "finding:disposed", "id": "v-F001", "disposition": "accepted",

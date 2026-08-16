@@ -674,11 +674,14 @@ that would produce wrong or unshippable work, low/info for improvements. The rc
 table in §6 applies unchanged — only a `complete` round is a review.
 
 **(c) Dispose every finding.** Record each one, then dispose it `fixed`,
-`accepted`, or `rejected`. What carries over unchanged from `clodex-plan` §9:
-the three dispositions and what each means, that **only the user** may accept or
-reject one (and their words go in the `note`), that nothing is ever dropped, and
-that severity does not restrict disposition — an `accepted` blocker is a
-legitimate end state that survives into ship.
+`accepted`, or `rejected` (`deferred-to-build` has no meaning here — build is
+where deferral lands). What carries over unchanged from `clodex-plan` §9:
+what each disposition means, that **only the user** may accept or reject one
+(and their words go in the `note`) — or a standing mandate granting
+`finding-disposition` (`clodex-plan` §6), with `by: "mandate"` and the note
+citing it — that nothing is ever dropped, and that severity does not restrict
+disposition: an `accepted` blocker is a legitimate end state that survives
+into ship.
 
 What does **not** carry over: that skill's `fixed` row says fixing implies an
 amendment and a new plan hash, because there the artifact being fixed *is* the
