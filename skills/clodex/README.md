@@ -21,6 +21,31 @@ an interrupted run and offers to resume it, generates the repo profile on first
 use, classifies the shape of the ask, and pins down the change boundary — what
 was already dirty before the run touched anything.
 
+## The workflow
+
+```mermaid
+flowchart LR
+  R(["<b>clodex</b><br/>preflight · resume · profile<br/>lane routing · change boundary"])
+  R -->|feature-shaped ask| P
+  R -->|audit-shaped ask| A(["<b>clodex-audit</b><br/>read-only investigation<br/>VERIFIED / HYPOTHESIS report"])
+  subgraph CORE["the core path — one run, one durable event log"]
+    direction LR
+    P(["<b>clodex-plan</b><br/>written plan · Codex plan review<br/>approval bound to content hash"])
+    B(["<b>clodex-build</b><br/>batches under contract<br/>Codex implements · every delta reviewed"])
+    V(["<b>clodex-verify</b><br/>repo gates + evidence classes<br/>debt recorded, never waived"])
+    S(["<b>clodex-ship</b><br/>one release authorization<br/>two-phase steps · terminal state"])
+    P --> B --> V --> S
+  end
+  A -.->|report routes follow-on runs| R
+```
+
+Claude orchestrates every stage; Codex sits on the other side of the table —
+it reviews the plan, implements the batches, and reviews the diffs, so the
+writer and the reviewer are never the same model. The loop-chart idea comes
+from the [TRIP workflow](https://github.com/PiLastDigit/TRIP-workflow)'s
+README — TRIP is this workflow's ancestor, and its Plan → Implement → Review →
+Test loop is what the stages above grew out of.
+
 ## What it's good for
 
 - **Not memorizing stage names.** The workflow this replaces had ten stages;
