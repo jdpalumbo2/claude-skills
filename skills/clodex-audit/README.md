@@ -33,3 +33,20 @@ The run model stays honest: an audit's manifest holds `lane: "audit"`, stage
 
 You do not invoke this skill directly. Invoke `clodex`; audit-shaped asks
 route here from its §4.
+
+## Who it's for
+
+Someone running the clodex workflow who wants "go review / inventory / assess
+X" to produce a report another session can act on — claims separated from
+hypotheses, keeps separated from candidates, and every item routed to the lane
+that would execute it — instead of a long message that reads well once and
+routes nothing.
+
+It needs the `clodex` skill installed beside it (the state engine and the
+repo's `.clodex/profile.json` live there), git, and Python 3.9+.
+
+## Install
+
+```bash
+ln -s "$(pwd)/skills/clodex-audit" ~/.claude/skills/clodex-audit
+```
