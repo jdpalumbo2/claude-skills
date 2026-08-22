@@ -45,52 +45,11 @@ A development workflow for Claude Code + Codex CLI: one front door, four
 stages, and an audit lane. Claude orchestrates; Codex independently reviews
 plans and code and implements under contract; every run is a durable event log
 that survives a dead session. It descends from the
-[TRIP workflow](https://github.com/PiLastDigit/TRIP-workflow) by PiLastDigit —
-lineage and the full control-flow graph live in the
-[clodex README](skills/clodex/README.md).
+[TRIP workflow](https://github.com/PiLastDigit/TRIP-workflow) by PiLastDigit.
 
-```mermaid
-flowchart TD
-    R["<b>Claude</b><br/>route · preflight"] -->|feature| P
-    R -->|audit| AU
-
-    subgraph CORE["one run · one durable event log"]
-        P["<b>Claude</b><br/>write plan"] --> PR["<b>Codex</b><br/>review plan"]
-        PR --> PD["<b>Claude</b><br/>dispose findings"]
-        PD -->|"material fix"| PR
-        PD -->|converged| PA{user approves?}
-        PA -->|APPROVED| B
-        PA -->|CHANGE| P
-        B["<b>Claude</b><br/>batch contract"] --> BI["<b>Codex</b><br/>implement"]
-        BI --> BR["<b>Codex</b><br/>review delta"]
-        BR -->|fail| BI
-        BR -->|pass| BC["<b>Claude</b><br/>commit"]
-        BC -->|next batch| B
-        BC -->|"assumption broke"| P
-        BC -->|done| V
-        V["<b>Claude</b><br/>evidence per class"]
-        V -->|produced| VE["evidence"]
-        V -->|"not produced"| VD["debt · reason · risk"]
-        VE --> S
-        VD --> S
-        S["<b>Claude</b> + <b>Codex</b><br/>final review"] --> SA{user authorizes<br/>argv + debt?}
-        SA -->|AUTHORIZED| SS["two-phase steps"]
-        SS -->|"push/deploy failed"| SS
-        SS -->|"verified-live / not-deployed"| END["run closed"]
-        SA -->|ABANDON| END
-    end
-
-    AU["<b>Claude</b><br/>read-only<br/>VERIFIED · HYPOTHESIS"] -.->|"follow-on runs"| R
-```
-
-| Skill | The stage it owns |
+| Skill | What it governs |
 |---|---|
-| [clodex](skills/clodex/) | The front door, and the shared engine the stages import: preflight, resuming interrupted runs, the repo's committed profile, lane routing, and the change boundary a run starts from |
-| [clodex-plan](skills/clodex-plan/) | A written plan, default-on Codex review with a disposition recorded per finding, the evidence classes "done" will have to prove, and an approval bound to the plan's content hash |
-| [clodex-build](skills/clodex-build/) | Batches under a written contract of owned and forbidden paths, a reviewed delta before every commit, and commits that stage explicit pathspecs only |
-| [clodex-verify](skills/clodex-verify/) | The repo's own gates, plus every declared evidence class ending as either produced evidence or a recorded debt entry naming its reason and risk — surfaced, never waived here |
-| [clodex-ship](skills/clodex-ship/) | The only stage that acts outside the repo: one authorization over literal argv, two-phase steps that reconcile against the remote before they retry, and a terminal release state |
-| [clodex-audit](skills/clodex-audit/) | The read-only lane: every claim tagged `VERIFIED (method)` or `HYPOTHESIS`, a verdict-first report, and per-item routing that feeds follow-on runs |
+| [clodex](skills/clodex/) | The whole pipeline: routing, staged `plan → build → verify → ship` execution, and the read-only audit lane. The five `clodex-*` stage skills install beside it; the full control-flow graph — actors, review loops, failure paths — lives in [its README](skills/clodex/README.md), for anyone who digs that deep |
 
 ### Rigor
 
