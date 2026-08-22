@@ -46,13 +46,41 @@ stages, and an audit lane. Claude orchestrates; Codex independently reviews
 plans and code and implements under contract; every run is a durable event log
 that survives a dead session. It descends from the
 [TRIP workflow](https://github.com/PiLastDigit/TRIP-workflow) by PiLastDigit —
-lineage and the full workflow diagram live in the
+lineage and the full control-flow graph live in the
 [clodex README](skills/clodex/README.md).
 
 ```mermaid
-flowchart LR
-  clodex([clodex]) --> plan --> build --> verify --> ship
-  clodex --> audit
+flowchart TD
+    R["<b>Claude</b><br/>route · preflight"] -->|feature| P
+    R -->|audit| AU
+
+    subgraph CORE["one run · one durable event log"]
+        P["<b>Claude</b><br/>write plan"] --> PR["<b>Codex</b><br/>review plan"]
+        PR --> PD["<b>Claude</b><br/>dispose findings"]
+        PD -->|"material fix"| PR
+        PD -->|converged| PA{user approves?}
+        PA -->|APPROVED| B
+        PA -->|CHANGE| P
+        B["<b>Claude</b><br/>batch contract"] --> BI["<b>Codex</b><br/>implement"]
+        BI --> BR["<b>Codex</b><br/>review delta"]
+        BR -->|fail| BI
+        BR -->|pass| BC["<b>Claude</b><br/>commit"]
+        BC -->|next batch| B
+        BC -->|"assumption broke"| P
+        BC -->|done| V
+        V["<b>Claude</b><br/>evidence per class"]
+        V -->|produced| VE["evidence"]
+        V -->|"not produced"| VD["debt · reason · risk"]
+        VE --> S
+        VD --> S
+        S["<b>Claude</b> + <b>Codex</b><br/>final review"] --> SA{user authorizes<br/>argv + debt?}
+        SA -->|AUTHORIZED| SS["two-phase steps"]
+        SS -->|"push/deploy failed"| SS
+        SS -->|"verified-live / not-deployed"| END["run closed"]
+        SA -->|ABANDON| END
+    end
+
+    AU["<b>Claude</b><br/>read-only<br/>VERIFIED · HYPOTHESIS"] -.->|"follow-on runs"| R
 ```
 
 | Skill | The stage it owns |
