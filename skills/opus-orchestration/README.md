@@ -4,18 +4,21 @@
 
 A process skill for running large multi-deliverable tasks — document sets,
 research corpora, audits, migrations — end to end without burning the
-premium main-thread model on delegable work. It's a strict three-layer split:
+premium main-thread model on delegable work. It's a strict split:
 
 | Layer | Role | Cost |
 |---|---|---|
-| Main thread (premium model) | The brain: plans, authors the workflow script, holds gates between dependent phases, does the final full review, directs fixes | Spent sparingly |
-| Deterministic Workflow script | The taskmaster: stages, fan-out, verify loops, and gate logic live in JavaScript | Zero model tokens |
-| Opus agents inside the script | The muscle: research, drafting, adversarial verification, fixes | The bulk of the work |
+| Orchestrator session (premium model) | The brain: specs, writes committed plan documents, holds gates between dependent phases, sequences merges, does the final full review, directs fixes | Spent sparingly |
+| Local Opus worker terminals | The muscle: full Claude Code sessions (`claude --model opus`), one per independent lane, each executing one committed plan and reporting checkpoints back via SendMessage | The bulk of the work, on subscription quota |
 
-One structural fact drives the whole design: subagents cannot spawn subagents,
-so an "orchestrator agent" middle layer stalls — the script *is* the
-orchestrator. Ships with [workflow-template.js](workflow-template.js), a
-production-proven script skeleton.
+Local terminals are the primary substrate: workers get the whole harness (live
+ssh, hooks, skills, human-in-the-loop auth steps) and the committed plan file is
+the entire interface between brain and muscle. A scripted **Workflow variant**
+remains for wide mechanical fan-out (dozens of schema-validated agents,
+zero-token control flow) — there the script *is* the orchestrator, since
+subagents cannot spawn subagents. Ships with
+[workflow-template.js](workflow-template.js), a production-proven skeleton for
+that mode.
 
 ## How it works
 
@@ -46,13 +49,17 @@ what deviated, and the judgment calls only the user can make.
 ## Who it's for
 
 People whose main-thread model is the expensive one and whose deliverables
-have to survive hostile review. Extracted from a real five-deliverable
-research build where the pattern ran end to end: ~36 Opus agents, every
-document gated on adversarial verification before its dependents started.
+have to survive hostile review. Extracted from real end-to-end runs in both
+modes (see below), every deliverable gated on adversarial verification before
+its dependents started.
 
-It assumes an agent harness with a Workflow (or equivalent scripted
-orchestration) tool and spawnable subagents; the user asking for the pattern
-is the explicit opt-in that tool requires.
+It assumes a harness where local sessions can message each other
+(SendMessage/ListAgents or equivalent) for the primary mode, and a Workflow
+(or equivalent scripted orchestration) tool with spawnable subagents for the
+script variant; the user asking for the pattern is the explicit opt-in that
+tool requires. Production runs: a five-deliverable research corpus (script
+mode, ~36 agents) and the 2026-08-21 crew infrastructure build (local worker
+mode, parallel terminals with orchestrator-held gates).
 
 ## Install
 
